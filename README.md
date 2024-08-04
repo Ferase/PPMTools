@@ -18,7 +18,7 @@ git clone https://github.com/Ferase/PPMTools
 pip install -r requirements.txt
 ```
 
-3. Import the parsing script from the module:
+3. Put the module in the same folder as your script and import the parsing script from the module:
 ```python
 import PPMTools.ppm_parse
 ```
