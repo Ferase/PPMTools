@@ -1,6 +1,6 @@
 # PPMTools
 
-A fork of [Hatenatools](https://github.com/pbsds/Hatenatools) by [pbsds aka Peder Bergebakken Sundt](https://pbsds.net/)
+A fork of [Hatenatools](https://github.com/pbsds/Hatenatools) by [pbsds (Peder Bergebakken Sundt)](https://pbsds.net/)
 
 **PPMTools** is a Python module that takes the PPM parsing script from Hatenatools, which was written for Python 2, and restructures it for use with Python 3.
 
@@ -58,7 +58,7 @@ output
 
 ## Credits
 
-All original code by [pbsds aka Peder Bergebakken Sundt](https://pbsds.net/) and other contributors to teh original Hatenatools project. The original Hatenatools README has been included as [Hatenatools_readme.txt](https://github.com/Ferase/PPMTools/blob/master/Hatenatools_readme.txt).
+All original code by [pbsds (Peder Bergebakken Sundt)](https://pbsds.net/) and other contributors to teh original Hatenatools project. The original Hatenatools README has been included as [Hatenatools_readme.txt](https://github.com/Ferase/PPMTools/blob/master/Hatenatools_readme.txt).
 
 If the authors of Hatenatools wish this repository to be taken down, please contact me and it will be done.
 
