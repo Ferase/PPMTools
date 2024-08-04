@@ -80,4 +80,4 @@ for flipnote in FILES:
         audio_composite = flip.CompositeAudio(sounds_dir, fps)
     
     # Export video as MP4
-    flip.ExportVideo(output_dir, fps, image_sequence, audio_composite)
+    flip.ExportVideo(output_dir, fps, image_sequence, audio_composite, True)

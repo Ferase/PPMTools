@@ -776,6 +776,7 @@ class PPM:
 		fps: float,
 		image_sequence: ImageSequenceClip,
 		audio_composite: CompositeAudioClip | None = None,
+		force_actual_duration: bool = False,
 		video_format: str = "mp4",
 		video_codec: str = "libx264",
 		audio_codec: str = "aac") -> None:
@@ -794,6 +795,8 @@ class PPM:
 			Image sequence containing all the frames of the Flipnote
 		audio_composite : CompositeAudioClip | None (default = `None`)
 			Audio composite of all sounds in the Flipnote, keep as None if Flipnote has no audio
+		force_actual_duration : bool (default = `False`)
+			Forces the end of the video to be after the last frame has fully played. If false, SFX played near the end of a Flipnote will cause the video to linger on the final frame while they finish playing
 		video_format : str (defualt = `"mp4"`)
 			Video format as a file extension, defualts to MP4
 		video_codec : str (defualt = `"libx264"`)
@@ -814,6 +817,11 @@ class PPM:
 		if audio_composite:
 			# Combine the video and merged audio
 			video = image_sequence.set_audio(audio_composite)
+
+		# Force video to end after Flipnote final frame, doesn't really do much if there's no sound
+		if force_actual_duration:
+			_, _, duration = self.GetAnimationStreamSettings()
+			video = video.set_duration(duration)
 
 		# Export MP4
 		video.write_videofile(os.path.join(output_dir, f"{os.path.basename(output_dir)}.{video_format}"), fps=fps, codec=video_codec, audio_codec=audio_codec)
