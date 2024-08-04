@@ -1,7 +1,7 @@
 import os
 import sys
 import shutil
-import ppmtools.ppm_parse as ppm
+import PPMTools.ppm_parse as ppm
 
 CWD = os.path.abspath(os.path.dirname(__file__))
 OUT_DIR = os.path.join(CWD, "output")
@@ -81,3 +81,5 @@ for flipnote in FILES:
     
     # Export video as MP4
     flip.ExportVideo(output_dir, fps, image_sequence, audio_composite, True)
+
+    shutil.copy2(flipnote_path_absolute, output_dir)
