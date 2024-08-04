@@ -1,7 +1,7 @@
 import os
 import sys
 import shutil
-import PPMTools.ppm_parse as ppm
+import PPMTools as ppm
 
 CWD = os.path.abspath(os.path.dirname(__file__))
 OUT_DIR = os.path.join(CWD, "output")

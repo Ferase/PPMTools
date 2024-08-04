@@ -1,6 +1,8 @@
 import time
 from binascii import hexlify
 
+
+
 # Constants --------------------
 
 FRAME_PALETTE = [
@@ -46,6 +48,8 @@ SPEEDS = [
 	20,
 	30
 ]
+
+
 
 # Functions --------------------
 
@@ -123,3 +127,61 @@ def GetSoundSize(audio_offset, frame_count, offset, lower_bound=False) -> bytes:
 # Converts internally stored filenames to proper strings
 def FilenameToString(file_name: tuple):
 	return "_".join([str(file_name[0])[2:-1], str(file_name[0])[2:-1], str(file_name[2])[2:-1]]) + ".pmm"
+
+
+
+# Exceptions --------------------
+
+# Raise if the provided flipnote isn't valid
+class PPMInvalid(Exception):
+    """
+    Raised if the binary data can't be interpreted as PPM data.
+    """
+
+    def __init__(self, message):
+        self.message = message
+        super().__init__(self.message)
+
+# Raise if the user tries to access data that wasn't loaded or doesn't exist
+class PPMCantLoadData(Exception):
+	"""
+	Raised if an attempt is made to access data that hasn't been loaded.
+	"""
+
+	def __init__(self, data="UNKNOWN"):
+
+		read_type = data
+		match data:
+			case "Metadata":
+				read_type = "DecodeThumbnail"
+			case "Frames":
+				read_type = "ReadFrames"
+			case "Sound":
+				read_type = "ReadSounds"
+			case _:
+				pass
+
+		self.message = f"Attempted to access {data}, but found nothing. Please check your ReadFile() and ReadBytes() calls and be sure you're setting {read_type} = True"
+		super().__init__(self.message)
+
+# Raise if the user tries to access data that wasn't loaded or doesn't exist
+class PPMMissingDependency(ModuleNotFoundError):
+	"""
+	Raised if an attempt is made to access data that hasn't been loaded.
+	"""
+
+	def __init__(self, module="UNKNOWN"):
+
+		install_note = module
+		match module:
+			case "PIL":
+				install_note = "pip install pillow"
+			case "moviepy":
+				install_note = "pip install moviepy"
+			case "FFMPEG":
+				install_note = "https://www.ffmpeg.org/download.html"
+			case _:
+				pass
+
+		self.message = f"You are missing {module}, please install it for PPMTools to function (f{install_note})"
+		super().__init__(self.message)
