@@ -19,7 +19,7 @@ Currently, PPMTools is not set up as a Python package. For now, you can utilize 
 
 ## Example
 
-`example.py` is an example usage of PPMTools that does the following:
+[example.py](https://github.com/Ferase/PPMTools/blob/master/example.py) is an example usage of PPMTools that does the following:
 
 1. Instantiates the PPM class and loads a Flipnote
 2. Creates an output directory tree
