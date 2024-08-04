@@ -8,14 +8,14 @@ A fork of [Hatenatools](https://github.com/pbsds/Hatenatools) by [pbsds aka Pede
 
 Currently, PPMTools is not set up as a Python package. For now, you can utilize this module by doing the following:
 
-1. Clone this repository with by clicking the green `Code` button and choosing `Downlaod ZIP` button, then unzip it after it downloads. Alternatively, you can use use Git with the following command:
-```git clone https://github.com/Ferase/PPMTools```
+Clone this repository with by clicking the green `Code` button and choosing `Downlaod ZIP` button, then unzip it after it downloads. Alternatively, you can use use Git with the following command:
+`git clone https://github.com/Ferase/PPMTools`
 
-2. Install requirements:
-```pip install -r requirements.txt```
+Install requirements:
+`pip install -r requirements.txt`
 
-3. Import the parsing script from the module:
-```import PPMTools.ppm_parse```
+Import the parsing script from the module:
+`import PPMTools.ppm_parse`
 
 ## Example
 
