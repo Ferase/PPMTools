@@ -1,15 +1,14 @@
 import os
 import glob
-import subprocess # FFMPEG
 import json
 import wave
 import audioop
+import time
 import numpy as np
-from . import funcs
+from binascii import hexlify
 
 HAS_PIL = False
 HAS_MOVIEPY = False
-HAS_FFMPEG = False
 
 # Import PIL if we have it
 try:
@@ -21,21 +20,200 @@ except ImportError:
 # Import moviepy if we have it
 try:
 	from moviepy.editor import ImageSequenceClip, AudioFileClip, CompositeAudioClip
+	from moviepy.audio.AudioClip import AudioArrayClip
 	HAS_MOVIEPY = True
 except ImportError:
 	print("Please install moviepy in order to combine exported frames and audio into video or GIF formats (pip install moviepy)")
 
-# Test for FFMPEG in the path
-try:
-	with open(os.devnull,"w") as null:
-		subprocess.call(["ffmpeg","-h"], stdout=null, stderr=null)
-		
-	HAS_FFMPEG = True
-except OSError:
-	print("Please install FFMPEG and include its location in your PATH variable so you can export video (https://www.ffmpeg.org/download.html)")
-	
 
-# PPM Class
+
+# Constants --------------------
+
+FRAME_PALETTE = [
+	0xFFFFFFFF,
+	0x000000FF,
+	0xFF0000FF,
+	0x0000FFFF
+]
+THUMB_PALETTE = (
+	0xFEFEFEFF,#0
+	0x4F4F4FFF,#1
+	0xFFFFFFFF,#2
+	0x9F9F9FFF,#3
+	0xFF0000FF,#4
+	0x770000FF,#5
+	0xFF7777FF,#6
+	0x00FF00FF,#7-
+	0x0000FFFF,#8
+	0x000077FF,#9
+	0x7777FFFF,#A
+	0x00FF00FF,#B-
+	0xFF00FFFF,#C
+	0x00FF00FF,#D-
+	0x00FF00FF,#E-
+	0x00FF00FF#F-
+)
+
+SOUND_NAMES = (
+	"BGM",
+	"SFX1",
+	"SFX2",
+	"SFX3"
+)
+
+SPEEDS = [
+	None,
+	0.5,
+	1,
+	2,
+	4,
+	6,
+	12,
+	20,
+	30
+]
+
+
+
+# Functions --------------------
+
+# ASCII string to decimal
+def AscDec(ascii, LittleEndian = False):
+	ret = 0
+	l = []
+
+	for num in ascii:
+		l.append(num)
+
+	if LittleEndian: l.reverse()
+	for i in l:
+		ret = (ret<<8) | i
+		
+	return ret
+
+# Decimal to ASCII string of specified length
+def DecAsc(dec, length = None, LittleEndian = False):
+	out = []
+	while dec != 0:
+		out.insert(0, dec&0xFF)
+		dec >>= 8
+	
+	if length:
+		if len(out) > length:
+			out = out[-length:]
+		if len(out) < length:
+			out = [0]*(length-len(out)) + out
+			
+	if LittleEndian: out.reverse()
+	return "".join(map(chr, out))
+
+# Add byte padding
+def AddPadding(i, pad = 0x10):
+	if i % pad != 0:
+		return i + pad - (i % pad)
+	return i
+
+# Decimal to hexadecimal
+def ToHex(num) -> bytes:
+	return hexlify(num).upper()
+
+# Decode string from data slice and remove trailing break
+def DecodeString(data_slice: bytes):
+	return data_slice.decode("UTF-16LE").split("\0")[0]
+
+def DecompressFilename(compressed_filename: bytes) -> tuple[bytes, bytes, str]:
+	first = ToHex(compressed_filename[:3])
+	second = compressed_filename[3:-2]
+	third = str(AscDec(compressed_filename[-2:], True)).zfill(3)
+
+	return first, second, third
+
+# Seconds since Jan 1st, 1970 converted to date
+def FormattedDateFromEpoch(datecode: bytes):
+	epoch = time.mktime(time.struct_time([2000, 1, 1, 0, 0, 0, 5, 1, -1]))
+
+	seconds = AscDec(datecode, True)
+	unformatted_date = time.gmtime(epoch+seconds)
+
+	return time.strftime(
+		"%A, %B %d, %Y, %I:%M:%S %p", # Dayname, monthname day, year, 12hour:minute:second meridiem
+		unformatted_date
+	)
+
+# Get the size of a sound block
+def GetSoundSize(audio_offset, frame_count, offset, lower_bound=False) -> bytes:
+
+	if lower_bound:
+		return AddPadding(audio_offset+frame_count, 4) + (4+offset)
+
+	return AddPadding(audio_offset+frame_count, 4) + offset
+
+# Converts internally stored filenames to proper strings
+def FilenameToString(file_name: tuple):
+	return "_".join([str(file_name[0])[2:-1], str(file_name[0])[2:-1], str(file_name[2])[2:-1]]) + ".pmm"
+
+
+
+# Exceptions --------------------
+
+# Raise if the provided flipnote isn't valid
+class PPMInvalid(Exception):
+    """
+    Raised if the binary data can't be interpreted as PPM data.
+    """
+
+    def __init__(self, message):
+        self.message = message
+        super().__init__(self.message)
+
+# Raise if the user tries to access data that wasn't loaded or doesn't exist
+class PPMCantLoadData(Exception):
+	"""
+	Raised if an attempt is made to access data that hasn't been loaded.
+	"""
+
+	def __init__(self, data="UNKNOWN"):
+
+		read_type = data
+		match data:
+			case "Metadata":
+				read_type = "DecodeThumbnail"
+			case "Frames":
+				read_type = "ReadFrames"
+			case "Sound":
+				read_type = "ReadSounds"
+			case _:
+				pass
+
+		self.message = f"Attempted to access {data}, but found nothing. Please check your ReadFile() and ReadBytes() calls and be sure you're setting {read_type} = True"
+		super().__init__(self.message)
+
+# Raise if the user tries to access data that wasn't loaded or doesn't exist
+class PPMMissingDependency(ModuleNotFoundError):
+	"""
+	Raised if an attempt is made to access data that hasn't been loaded.
+	"""
+
+	def __init__(self, module="UNKNOWN"):
+
+		install_note = module
+		match module:
+			case "PIL":
+				install_note = "pip install pillow"
+			case "moviepy":
+				install_note = "pip install moviepy"
+			case "FFMPEG":
+				install_note = "https://www.ffmpeg.org/download.html"
+			case _:
+				pass
+
+		self.message = f"You are missing {module}, please install it for PPMTools to function (f{install_note})"
+		super().__init__(self.message)
+
+
+
+# PPM Class --------------------
+
 class PPM:
 
 	# Initialize
@@ -127,45 +305,45 @@ class PPM:
 
 		# Ensure data is PPM
 		if data[:4] != b"PARA": # Check header magic
-			raise funcs.PPMInvalid(message=f"Header magic is \"{data[:4]}\" instead of \"PARA\".")
+			raise PPMInvalid(message=f"Header magic is \"{data[:4]}\" instead of \"PARA\".")
 		if len(data) <= 0x6a0: # Check PPM data length
-			raise funcs.PPMInvalid(message=f"Data is {len(data)} bytes long, it should be {str(int(0x6a0))} or longer.")
+			raise PPMInvalid(message=f"Data is {len(data)} bytes long, it should be {str(int(0x6a0))} or longer.")
 		
 		# Read audio data
-		Audio_Offset = funcs.AscDec(data[4:8], True) + 0x6a0
-		Audio_Length = funcs.AscDec(data[8:12], True)
+		Audio_Offset = AscDec(data[4:8], True) + 0x6a0
+		Audio_Length = AscDec(data[8:12], True)
 
 		# Get frame count
-		self.FrameCount = funcs.AscDec(data[12:14], True) + 1
+		self.FrameCount = AscDec(data[12:14], True) + 1
 
 		# Set to true if locked, false otherwise
 		self.Locked = data[0x10] & 0x01 == 1
 
 		# The frame index of the thumbnail
-		self.ThumbnailFrameIndex = funcs.AscDec(data[0x12:0x14], True)
+		self.ThumbnailFrameIndex = AscDec(data[0x12:0x14], True)
 		
 		# Contributor names
-		self.OriginalAuthorName = str(funcs.DecodeString(data[0x14:0x2A]))
-		self.EditorAuthorName = str(funcs.DecodeString(data[0x2A:0x40]))
-		self.Username = str(funcs.DecodeString(data[0x40:0x56]))
+		self.OriginalAuthorName = str(DecodeString(data[0x14:0x2A]))
+		self.EditorAuthorName = str(DecodeString(data[0x2A:0x40]))
+		self.Username = str(DecodeString(data[0x40:0x56]))
 
 		# Contributor ID's
-		self.OriginalAuthorID = str(funcs.ToHex(data[0x56:0x5e][::-1]))[2:-1]
-		self.EditorAuthorID = str(funcs.ToHex(data[0x5E:0x66][::-1]))[2:-1]
+		self.OriginalAuthorID = str(ToHex(data[0x56:0x5e][::-1]))[2:-1]
+		self.EditorAuthorID = str(ToHex(data[0x5E:0x66][::-1]))[2:-1]
 
 		# ID of the previous editor(?)
-		self.PreviousEditAuthorID = str(funcs.ToHex(data[0x8a:0x92][::-1]))[2:-1]
+		self.PreviousEditAuthorID = str(ToHex(data[0x8a:0x92][::-1]))[2:-1]
 
 		# Filenames (compressed)
 		self.OriginalFilenameC = data[0x66:0x78]
 		self.CurrentFilenameC = data[0x78:0x8a]
 
 		# Get Filenames from compressed names
-		self.OriginalFilename = funcs.FilenameToString(funcs.DecompressFilename(self.OriginalFilenameC))
-		self.CurrentFilename = funcs.FilenameToString(funcs.DecompressFilename(self.CurrentFilenameC))
+		self.OriginalFilename = FilenameToString(DecompressFilename(self.OriginalFilenameC))
+		self.CurrentFilename = FilenameToString(DecompressFilename(self.CurrentFilenameC))
 
 		# Get embedded date
-		self.Date = funcs.FormattedDateFromEpoch(data[0x9a:0x9e])
+		self.Date = FormattedDateFromEpoch(data[0x9a:0x9e])
 
 		# Get raw thumbnail data, and decode it if the user asked to
 		self.RawThumbnail = data[0xa0:0x6a0]
@@ -179,32 +357,32 @@ class PPM:
 		self.Looped = data[0x06A6] >> 1 & 0x01 == 1
 
 		# Read animation sequence header
-		Animation_Offset = 0x6a8 + funcs.AscDec(data[0x6a0:0x6a4], True)
-		Frame_Offsets = [Animation_Offset + funcs.AscDec(data[0x06a8+i*4:0x06a8+i*4+4], True) for i in range(self.FrameCount)]
+		Animation_Offset = 0x6a8 + AscDec(data[0x6a0:0x6a4], True)
+		Frame_Offsets = [Animation_Offset + AscDec(data[0x06a8+i*4:0x06a8+i*4+4], True) for i in range(self.FrameCount)]
 
 		# Read what frames have SFX
 		self.SFXUsage = [(i&0x1!=0, i&0x2!=0, i&0x4!=0) for i in data[Audio_Offset:Audio_Offset+self.FrameCount]]
 
-		funcs.GetSoundSize(Audio_Offset, self.FrameCount, 0)
+		GetSoundSize(Audio_Offset, self.FrameCount, 0)
 
 		Sound_Size = (
-			funcs.AscDec(data[
-				funcs.GetSoundSize(Audio_Offset, self.FrameCount, 0):
-				funcs.GetSoundSize(Audio_Offset, self.FrameCount, 0, True)], True), # BGM
-			funcs.AscDec(data[
-				funcs.GetSoundSize(Audio_Offset, self.FrameCount, 4):
-				funcs.GetSoundSize(Audio_Offset, self.FrameCount, 4, True)], True), # SFX1
-			funcs.AscDec(data[
-				funcs.GetSoundSize(Audio_Offset, self.FrameCount, 8):
-				funcs.GetSoundSize(Audio_Offset, self.FrameCount, 8, True)], True), # SFX2
-			funcs.AscDec(data[
-				funcs.GetSoundSize(Audio_Offset, self.FrameCount, 12):
-				funcs.GetSoundSize(Audio_Offset, self.FrameCount, 12, True)], True) # SFX3
+			AscDec(data[
+				GetSoundSize(Audio_Offset, self.FrameCount, 0):
+				GetSoundSize(Audio_Offset, self.FrameCount, 0, True)], True), # BGM
+			AscDec(data[
+				GetSoundSize(Audio_Offset, self.FrameCount, 4):
+				GetSoundSize(Audio_Offset, self.FrameCount, 4, True)], True), # SFX1
+			AscDec(data[
+				GetSoundSize(Audio_Offset, self.FrameCount, 8):
+				GetSoundSize(Audio_Offset, self.FrameCount, 8, True)], True), # SFX2
+			AscDec(data[
+				GetSoundSize(Audio_Offset, self.FrameCount, 12):
+				GetSoundSize(Audio_Offset, self.FrameCount, 12, True)], True) # SFX3
 		)
 
 		# Get framespeed
-		self.Framespeed = 8 - data[funcs.AddPadding(Audio_Offset+self.FrameCount, 4) + 16]
-		self.BGMFramespeed = 8 - data[funcs.AddPadding(Audio_Offset+self.FrameCount, 4) + 17]
+		self.Framespeed = 8 - data[AddPadding(Audio_Offset+self.FrameCount, 4) + 16]
+		self.BGMFramespeed = 8 - data[AddPadding(Audio_Offset+self.FrameCount, 4) + 17]
 
 		# Decode frames if the user asked to
 		if ReadFrames:
@@ -229,7 +407,7 @@ class PPM:
 		#Read the Audio:
 		if ReadSound:
 			self.SoundData = []
-			pos = funcs.AddPadding(Audio_Offset+self.FrameCount+32, 4)
+			pos = AddPadding(Audio_Offset+self.FrameCount+32, 4)
 			for i in range(4):
 				self.SoundData.append(data[pos:pos+Sound_Size[i]])
 				pos += Sound_Size[i]
@@ -261,12 +439,12 @@ class PPM:
 
 		# Check that frames were loaded
 		if not self.Loaded["Frames"]:
-			raise funcs.PPMCantLoadData("Frames")
+			raise PPMCantLoadData("Frames")
 		
 		inverted, colors, frame = self.Frames[frame_index]
 		
 		# Defines the palette:
-		palette = funcs.FRAME_PALETTE[:]
+		palette = FRAME_PALETTE[:]
 		if inverted:
 			palette[0], palette[1] = palette[1], palette[0]
 
@@ -299,12 +477,12 @@ class PPM:
 		"""
 
 		if not self.RawThumbnail:
-			funcs.PPMCantLoadData("Thumbnail")
+			PPMCantLoadData("Thumbnail")
 		
 		out = np.zeros((64, 48), dtype=">u4")
 		
 		#speedup:
-		palette = funcs.THUMB_PALETTE
+		palette = THUMB_PALETTE
 		
 		#8x8 tiling:
 		for ty in range(6):
@@ -319,7 +497,7 @@ class PPM:
 		self.Thumbnail = out
 		return self.Thumbnail
 	
-	def GetSound(self, sound_index: int, output_path: str | os.PathLike | None = None):
+	def GetSound(self, sound_index: int, output_path: str | os.PathLike | None = None, sample_rate: int = 8192):
 		"""
 		Get a sound from the specified index in the Flipnote data.
 
@@ -335,9 +513,10 @@ class PPM:
 			- 1 = SFX1
 			- 2 = SFX2
 			- 3 = SFX3
-		output_path : str | os.PathLike | None
-			Path to output the desired audio.
-			If None, then it will be returned as bytes
+		output_path : str | os.PathLike | None (default = None)
+			Path to output the desired audio. If None, then it will be returned as bytes
+		sample_rate : int (default = 8192)
+			Sample rate to export the audio at. `8192` is a Flipnote's default sample rate
 		
 		Returns
 		-------
@@ -346,7 +525,7 @@ class PPM:
 		"""
 
 		if not self.Loaded["Sound"]:
-			funcs.PPMCantLoadData("Sound")
+			PPMCantLoadData("Sound")
 
 		if self.SoundData[sound_index]:
 			# Reverse nibbles:
@@ -364,13 +543,17 @@ class PPM:
 				return decoded
 
 			# Name out file and concatenate it with output path
-			out_file = os.path.join(output_path, f"{funcs.SOUND_NAMES[sound_index]}.wav")
+			out_file = os.path.join(output_path, f"{SOUND_NAMES[sound_index]}.wav")
+
+			# Rename file if the sample rate is different than the defualt
+			if sample_rate != 8192:
+				out_file = os.path.join(output_path, f"{SOUND_NAMES[sound_index]}_{str(int(sample_rate))}Hz.wav")
 
 			# Write wav file
 			with wave.open(out_file, "wb") as f:
 				f.setnchannels(1)
 				f.setsampwidth(2)
-				f.setframerate(8192)
+				f.setframerate(sample_rate)
 				f.writeframes(decoded)
 
 			return out_file
@@ -408,8 +591,8 @@ class PPM:
 		if Unknown & 0x2: # Doesn't work 100%...
 			print("Frame_Move at offset ", offset-1)
 			
-			move_x = funcs.AscDec(data[offset+0:offset+1], True)
-			move_y = funcs.AscDec(data[offset+1:offset+2], True)
+			move_x = AscDec(data[offset+0:offset+1], True)
+			move_y = AscDec(data[offset+1:offset+2], True)
 			Frame_Move[0] = move_x if move_x <= 127 else move_x-256
 			Frame_Move[1] = move_y if move_y <= 127 else move_y-256
 			offset += 2
@@ -431,7 +614,7 @@ class PPM:
 				if Encoding[layer][y] == 0:#Nothing
 					pass
 				elif Encoding[layer][y] == 1:#Normal
-					UseByte = funcs.AscDec(data[offset:offset+4])
+					UseByte = AscDec(data[offset:offset+4])
 					offset += 4
 					x = 0
 					while UseByte & 0xFFFFFFFF:
@@ -447,7 +630,7 @@ class PPM:
 							x += 8
 						UseByte <<= 1
 				elif Encoding[layer][y] == 2:#Inverted
-					UseByte = funcs.AscDec(data[offset:offset+4])
+					UseByte = AscDec(data[offset:offset+4])
 					offset += 4
 					x = 0
 					while UseByte&0xFFFFFFFF:
@@ -521,7 +704,7 @@ class PPM:
 		global HAS_PIL
 
 		if not HAS_PIL:
-			raise funcs.PPMMissingDependency("PIL")
+			raise PPMMissingDependency("PIL")
 
 		out = image.tostring("F")	
 		out = Image.frombytes("RGBA", (len(image), len(image[0])), out)
@@ -620,7 +803,7 @@ class PPM:
 		"""
 
 		speed = int(self.Framespeed)
-		fps = funcs.SPEEDS[speed]
+		fps = SPEEDS[speed]
 		duration = float(self.FrameCount) / float(fps)
 
 		return speed, fps, duration
@@ -648,7 +831,7 @@ class PPM:
 		global HAS_MOVIEPY
 
 		if not HAS_MOVIEPY:
-			raise funcs.PPMMissingDependency("moviepy")
+			raise PPMMissingDependency("moviepy")
 
 		images = glob.glob(os.path.join(images_dir, "*.png"))
 		images.sort()
@@ -675,21 +858,22 @@ class PPM:
 			Audio clip of the processed BGM
 		"""
 
-		global HAS_FFMPEG, HAS_MOVIEPY
-
-		if not HAS_FFMPEG:
-			raise funcs.PPMMissingDependency("FFMPEG")
+		global HAS_MOVIEPY
 
 		if not HAS_MOVIEPY:
-			raise funcs.PPMMissingDependency("moviepy")
+			raise PPMMissingDependency("moviepy")
 
-		new_rate = 8192*(float(fps) / funcs.SPEEDS[self.BGMFramespeed])
-		str_rate = str((int(new_rate)))
-		bgm_out = os.path.join(sounds_dir, "BGM_SPEED.wav")
-		
-		subprocess.call(["ffmpeg", "-i", os.path.join(sounds_dir, "BGM.wav"), "-filter_complex", f"[0]asetrate={str_rate}", bgm_out, "-map", "0:a", "-acodec", "pcm_s16le"])
+		normal_rate = 8192
+		new_rate = normal_rate * (float(fps) / SPEEDS[self.BGMFramespeed])
 
-		return AudioFileClip(bgm_out)
+		bgm_file = os.path.join(sounds_dir, f"{SOUND_NAMES[0]}.wav")
+		bgm_out = AudioFileClip(bgm_file)
+
+		# If the sample rate is different, create a new BGM file
+		if normal_rate != new_rate:
+			bgm_out = AudioFileClip(self.GetSound(0, sounds_dir, new_rate))
+	
+		return bgm_out
 
 	# Place SFX on the frames they should play
 	def SetSFX(self, sfx_file: str | os.PathLike, fps: float, frame: int) -> AudioFileClip:
@@ -739,7 +923,7 @@ class PPM:
 		global HAS_MOVIEPY
 
 		if not HAS_MOVIEPY:
-			raise funcs.PPMMissingDependency("moviepy")
+			raise PPMMissingDependency("moviepy")
 		
 		final_sounds = []
 
@@ -760,7 +944,7 @@ class PPM:
 					continue
 				
 				# Get the name of the current SFX
-				current = funcs.SOUND_NAMES[idx+1]
+				current = SOUND_NAMES[idx+1]
 
 				# For each frame that needs a sound effect in the current SFX, append it at that frame
 				for frame in sfx_frames[current]:
@@ -770,11 +954,12 @@ class PPM:
 
 	# Export video file
 	def ExportVideo(self,
+		output_filename: str,
 		output_dir: str | os.PathLike,
 		fps: float,
 		image_sequence: ImageSequenceClip,
 		audio_composite: CompositeAudioClip | None = None,
-		force_actual_duration: bool = False,
+		force_final_frame: bool = True,
 		video_format: str = "mp4",
 		video_codec: str = "libx264",
 		audio_codec: str = "aac") -> None:
@@ -785,6 +970,8 @@ class PPM:
 		----------
 		self : ppm_parser.PPM
 			PPM instance
+		output_filename : str
+			Name of the video file
 		output_dir : str | os.PathLike
 			Folder to output the video to
 		fps : float
@@ -793,8 +980,8 @@ class PPM:
 			Image sequence containing all the frames of the Flipnote
 		audio_composite : CompositeAudioClip | None (default = `None`)
 			Audio composite of all sounds in the Flipnote, keep as None if Flipnote has no audio
-		force_actual_duration : bool (default = `False`)
-			Forces the end of the video to be after the last frame has fully played. If false, SFX played near the end of a Flipnote will cause the video to linger on the final frame while they finish playing
+		force_final_frame : bool (default = `True`)
+			Forces the video to end after the last frame of animation has played. If false, any SFX played near the end of a Flipnote will cause the video to linger on the final frame while they finish playing
 		video_format : str (defualt = `"mp4"`)
 			Video format as a file extension, defualts to MP4
 		video_codec : str (defualt = `"libx264"`)
@@ -806,7 +993,7 @@ class PPM:
 		global HAS_MOVIEPY
 
 		if not HAS_MOVIEPY:
-			raise funcs.PPMMissingDependency("moviepy")
+			raise PPMMissingDependency("moviepy")
 
 		# Initialize video
 		video = image_sequence
@@ -817,14 +1004,14 @@ class PPM:
 			video = image_sequence.set_audio(audio_composite)
 
 		# Force video to end after Flipnote final frame, doesn't really do much if there's no sound
-		if force_actual_duration:
+		if force_final_frame:
 			_, _, duration = self.GetAnimationStreamSettings()
 			video = video.set_duration(duration)
 
 		# Export MP4
-		video.write_videofile(os.path.join(output_dir, f"{os.path.basename(output_dir)}.{video_format}"), fps=fps, codec=video_codec, audio_codec=audio_codec)
+		video.write_videofile(os.path.join(output_dir, f"{output_filename}.{video_format}"), fps=fps, codec=video_codec, audio_codec=audio_codec)
 			
-	def ExportGIF(self, output_dir: str | os.PathLike, fps: float, iamge_sequence: ImageSequenceClip) -> None:
+	def ExportGIF(self, output_filename: str, output_dir: str | os.PathLike, fps: float, image_sequence: ImageSequenceClip) -> None:
 		"""
 		Exports a Flipnote as a GIF file
 
@@ -832,6 +1019,8 @@ class PPM:
 		----------
 		self : ppm_parser.PPM
 			PPM instance
+		output_filename : str
+			Name of the video file
 		output_dir : str | os.PathLike
 			Folder to output the GIF to
 		fps : float
@@ -843,10 +1032,10 @@ class PPM:
 		global HAS_MOVIEPY
 
 		if not HAS_MOVIEPY:
-			raise funcs.PPMMissingDependency("moviepy")
+			raise PPMMissingDependency("moviepy")
 		
 		# Export GIF
-		iamge_sequence.write_gif(os.path.join(output_dir, f"{os.path.basename(output_dir)}.gif"), fps=fps)
+		image_sequence.write_gif(os.path.join(output_dir, f"{output_filename}.gif"), fps=fps)
 
 	def ExportThumbnail(self, output_dir: str | os.PathLike, thumbnail_file_name: str = "thumbnail") -> None:
 		"""
@@ -865,7 +1054,7 @@ class PPM:
 		global HAS_PIL
 
 		if not HAS_PIL:
-			raise funcs.PPMMissingDependency("PIL")
+			raise PPMMissingDependency("PIL")
 		
 		thumb = self.GetThumbnail()
 
