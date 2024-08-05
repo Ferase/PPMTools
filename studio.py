@@ -124,8 +124,7 @@ args = parser.parse_args()
 
 
 def GetInFiles():
-
-    # Priprotize single files
+    # Prioritize single files
     if args.files:
         return args.files
     elif args.in_dir:
@@ -133,7 +132,6 @@ def GetInFiles():
 
 # Create output folders
 def CreateDumpDir(flip_name: str):
-
     # Set dump dir
     dump_dir = os.path.join(args.out_dir, flip_name)
 
