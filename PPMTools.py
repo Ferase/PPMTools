@@ -601,69 +601,77 @@ class PPM:
 		
 		# Read the line encoding of the layers:
 		for layer in range(2):
-			for byte in data[offset:offset+48]:
-				Encoding[layer].append(byte      & 0x03)
-				Encoding[layer].append(byte >> 2 & 0x03)
-				Encoding[layer].append(byte >> 4 & 0x03)
-				Encoding[layer].append(byte >> 6       )
+			for byte in data[offset:offset + 48]:
+				Encoding[layer].extend(
+					[
+						byte & 0x03,
+						byte >> 2 & 0x03,
+						byte >> 4 & 0x03,
+						byte >> 6
+					]
+				)
 			offset += 48
 		
 		# Read layers:
 		for layer in range(2):
 			for y in range(192):
-				if Encoding[layer][y] == 0:#Nothing
-					pass
-				elif Encoding[layer][y] == 1:#Normal
-					UseByte = AscDec(data[offset:offset+4])
-					offset += 4
-					x = 0
-					while UseByte & 0xFFFFFFFF:
-						if UseByte & 0x80000000:
+				
+				# Match encoding layer
+				match Encoding[layer][y]:
+					case 1: # Normal
+						UseByte = AscDec(data[offset:offset+4])
+						offset += 4
+						x = 0
+						while UseByte & 0xFFFFFFFF:
+							if UseByte & 0x80000000:
+								byte = data[offset]
+								offset += 1
+								for _ in range(8):
+									if byte & 0x01:
+										Frame[layer][x][y] = True
+									x += 1
+									byte >>= 1
+							else:
+								x += 8
+							UseByte <<= 1
+					case 2: # Inverted
+						UseByte = AscDec(data[offset:offset+4])
+						offset += 4
+						x = 0
+						while UseByte & 0xFFFFFFFF:
+							if UseByte & 0x80000000:
+								byte = data[offset]
+								offset += 1
+								for _ in range(8):
+									if not byte & 0x01:
+										Frame[layer, x, y] = True
+									x += 1
+									byte >>= 1
+							else:
+								x += 8
+							UseByte <<= 1
+						for n in range(256):
+							Frame[layer, n, y] = not Frame[layer, n, y]
+					case 3: 
+						x = 0
+						for _ in range(32):
 							byte = data[offset]
 							offset += 1
 							for _ in range(8):
 								if byte & 0x01:
-									Frame[layer][x][y] = True
-								x += 1
-								byte >>= 1
-						else:
-							x += 8
-						UseByte <<= 1
-				elif Encoding[layer][y] == 2:#Inverted
-					UseByte = AscDec(data[offset:offset+4])
-					offset += 4
-					x = 0
-					while UseByte&0xFFFFFFFF:
-						if UseByte & 0x80000000:
-							byte = data[offset]
-							offset += 1
-							for _ in range(8):
-								if not byte & 0x01:
 									Frame[layer, x, y] = True
 								x += 1
 								byte >>= 1
-						else:
-							x += 8
-						UseByte <<= 1
-					for n in range(256):
-						Frame[layer, n, y] = not Frame[layer, n, y]
-				elif Encoding[layer][y] == 3:
-					x = 0
-					for _ in range(32):
-						byte = data[offset]
-						offset += 1
-						for _ in range(8):
-							if byte & 0x01:
-								Frame[layer, x, y] = True
-							x += 1
-							byte >>= 1
+					case _: # Nothing
+						pass
+
 		
 		# Merges this frame with the previous frame if New_Frame isn't true:
-		if not New_Frame and prev_frame.all() != None:# Maybe optimize this better for numpy...
-			if Frame_Move[0] or Frame_Move[1]:# Moves the previous frame if specified:
+		if not New_Frame and prev_frame.all() != None: # Maybe optimize this better for numpy...
+			if Frame_Move[0] or Frame_Move[1]: # Moves the previous frame if specified:
 				New_Prev_Frame = np.zeros((2, 256, 192), dtype=np.bool_)
 				
-				for y in range(192):# This still isn't perfected
+				for y in range(192): # This still isn't perfected
 					for x in range(256):
 						Temp_X = x+Frame_Move[0]
 						Temp_Y = y+Frame_Move[1]
@@ -674,11 +682,11 @@ class PPM:
 				prev_frame = New_Prev_Frame
 			
 			# Merge the frames:
-			Frame = Frame != prev_frame
+			Frame ^= prev_frame
 		
 		return Frame
 	
-	def WriteImage(self, image: bytes, frame_index: int, output_path: str | os.PathLike) -> Image.Image:
+	def WriteImage(self, image: bytes, frame_index: int, output_path: str | os.PathLike, sclae_factor: int = 1) -> Image.Image:
 		"""
 		Write a PPM frame to a PNG image file using byte data and PIL
 
@@ -694,6 +702,8 @@ class PPM:
 			Index of the desired frame. Padded to 3 digits (e.g. `012` instead of `12`)
 		output_path : str | os.PathLike
 			Output path for the image
+		sclae_factor : int (default = 1)
+			Factor to upscale the image by
 		
 		Returns
 		-------
@@ -706,8 +716,12 @@ class PPM:
 		if not HAS_PIL:
 			raise PPMMissingDependency("PIL")
 
-		out = image.tostring("F")	
-		out = Image.frombytes("RGBA", (len(image), len(image[0])), out)
+		new_image = image
+		if sclae_factor > 1:
+			new_image = np.repeat(np.repeat(image, sclae_factor, axis = 0), sclae_factor, axis = 1)
+
+		out = new_image.tostring("F")	
+		out = Image.frombytes("RGBA", (len(new_image), len(new_image[0])), out)
 		
 		full_output_path = os.path.join(output_path, f"{str(frame_index).zfill(3)}.png")
 		out.save(full_output_path, format="PNG")
@@ -715,7 +729,7 @@ class PPM:
 		return out
 	
 	# Dump frames to PNG
-	def DumpFrames(self, output_path: str | os.PathLike) -> None:
+	def DumpFrames(self, output_path: str | os.PathLike, scale_factor: int = 1) -> None:
 		"""
 		Dump all frames in a PPM to PNG
 
@@ -725,11 +739,17 @@ class PPM:
 			PPM instance
 		output_path : str | os.PathLike
 			Output path for the PNG images
+		sclae_factor : int (default = 1)
+			Factor to upscale all frames by
+			- 1 = Native (256px x 192px)
+			- 2 = Double (512px x 384px) 
+			- 4 = Quadruple (1024px x 768px)
+			- ...
 		"""
 
 		for i in range(self.FrameCount):
 			print(f"Exporting frame {i+1} of {self.FrameCount}")
-			self.WriteImage(self.GetFrame(i), i, output_path)
+			self.WriteImage(self.GetFrame(i), i, output_path, scale_factor)
 
 	def CheckIfSoundDataExists(self) -> bool:
 		if all(len(sound) <= 0 for sound in self.SoundData):

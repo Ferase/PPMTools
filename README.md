@@ -30,8 +30,8 @@ import PPMTools
 Here is the script's `-h`, or help, command:
 
 ```text
-usage: PPMTools Studio [-h] [-i IN_DIR] [-o OUT_DIR] [-a] [-k] [-f] [-sf] [-s] [-ss] [-t] [-m] [-x] [-e {MP4,GIF}]
-                       [-c]
+usage: PPMTools Studio [-h] [-i IN_DIR] [-o OUT_DIR] [-u SCALE_FACTOR] [-a] [-k] [-f] [-sf] [-s] [-ss] [-t] [-m] [-x]
+                       [-e {MP4,GIF}] [-c]
                        [files ...]
 
 A parser and exporter for Flipnote Studio PPM files. Original code from Hatenatools by pbsds (Peder Bergebakken Sundt)
@@ -48,6 +48,9 @@ options:
                         files argument
   -o OUT_DIR, --outdir OUT_DIR
                         Output directory for dumped/exported data
+  -u SCALE_FACTOR, --upscale SCALE_FACTOR
+                        Upscale frames by a scale factor. Default is native resolution (scale_factor = 1), which is
+                        256px x 192px
   -a, --all             Dumps everything possible, doesn't delete any leftover data after MP4/GIF export
   -k, --keepall         Keep all data after dumping and exporting, don't delete anything
   -f, --keepframes      Doesn't delete frames after export. If set, all extracted resources will be put into a child

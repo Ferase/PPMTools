@@ -44,6 +44,13 @@ parser.add_argument(
     help="Output directory for dumped/exported data"
 )
 parser.add_argument(
+    "-u", "--upscale",
+    dest="scale_factor",
+    type=int,
+    default=1,
+    help="Upscale frames by a scale factor. Default is native resolution (scale_factor = 1), which is 256px x 192px"
+)
+parser.add_argument(
     "-a", "--all",
     dest="dump_all",
     action="store_true",
@@ -190,8 +197,8 @@ for flipnote in FILES:
         images_dir = os.path.join(dump_dir, IMG_FOLER_NAME)
         os.mkdir(images_dir)
 
-        # Dump images to the flip_name/img folder
-        flip.DumpFrames(images_dir)
+        # Dump images to the flip_name/img folder and set scale if user defined a different factor
+        flip.DumpFrames(images_dir, args.scale_factor)
 
         # Create a moviepy image sequence
         image_sequence = flip.CreateImageSequence(images_dir, fps)
