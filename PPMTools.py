@@ -252,7 +252,7 @@ class PPM:
 		----------
 		self : ppm_parser.PPM
 			PPM instance
-		data : str | os.PathLike
+		path : str | os.PathLike
 			Path to Flipnote PPM file
 		DecodeThumbnail : bool (defualt = `True`)
 			If true, decode the Flipnote's thumbnail
