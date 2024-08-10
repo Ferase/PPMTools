@@ -52,7 +52,7 @@ options:
   -u SCALE_FACTOR, --upscale SCALE_FACTOR
                         Upscale frames by a scale factor. Default is native resolution (scale_factor = 1), which is
                         256px x 192px
-  -a, --all             Dumps everything possible, doesn't delete any leftover data after MP4/GIF export
+  -a, --all             Dumps everything possible, ignores -f, -s, -ss, -t, -m, and -x
   -f, --keepframes      Doesn't delete frames after export. If set, all extracted resources will be put into a child
                         folder inside of the output directory
   -s, --keepsounds      Doesn't delete sounds after export. If set, all extracted resources will be put into a child

@@ -54,7 +54,7 @@ parser.add_argument(
     "-a", "--all",
     dest="dump_all",
     action="store_true",
-    help="Dumps everything possible, doesn't delete any leftover data after MP4/GIF export"
+    help="Dumps everything possible, ignores -f, -s, -ss, -t, -m, and -x"
 )
 parser.add_argument(
     "-f", "--keepframes",
