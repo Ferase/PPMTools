@@ -9,17 +9,20 @@ A fork of [Hatenatools](https://github.com/pbsds/Hatenatools) by [pbsds (Peder B
 Currently, PPMTools is not set up as a Python package. For now, you can utilize this module by doing the following:
 
 1. Clone this repository with by clicking the green `Code` button and choosing `Downlaod ZIP` button, then unzip it after it downloads. Alternatively, you can use use Git with the following command:
-```
+
+```text
 git clone https://github.com/Ferase/PPMTools
 ```
 
 2. Install requirements:
-```
+
+```text
 pip install -r requirements.txt
 ```
 
 3. Put the module in the same folder as your script and import the PPM class:
-```
+
+```python
 from PPMTools import PPM
 ```
 
@@ -95,7 +98,6 @@ flip.exported_frames_to_image_sequence_clip(...) # Merges exported frames into a
 flip.sfx_usage_to_dict(...) # Creates a dictionary referencing on which frame index each of the SFX should play
 flip.compose_audio(...) # Merges exported audio into a MoviePy CompositeAudioClip, properly placing SFX
 ```
-
 
 ## Credits
 
