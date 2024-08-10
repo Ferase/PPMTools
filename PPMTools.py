@@ -1,10 +1,14 @@
 import os
+import gc
 import glob
 import json
+import shutil
 import wave
 import audioop
 import time
 import numpy as np
+from tempfile import TemporaryDirectory
+from typing import Iterable
 from binascii import hexlify
 
 HAS_PIL = False
@@ -75,107 +79,28 @@ SPEEDS = [
 
 
 
-# Functions --------------------
-
-# ASCII string to decimal
-def AscDec(ascii, LittleEndian = False):
-	ret = 0
-	l = []
-
-	for num in ascii:
-		l.append(num)
-
-	if LittleEndian: l.reverse()
-	for i in l:
-		ret = (ret<<8) | i
-		
-	return ret
-
-# Decimal to ASCII string of specified length
-def DecAsc(dec, length = None, LittleEndian = False):
-	out = []
-	while dec != 0:
-		out.insert(0, dec&0xFF)
-		dec >>= 8
-	
-	if length:
-		if len(out) > length:
-			out = out[-length:]
-		if len(out) < length:
-			out = [0]*(length-len(out)) + out
-			
-	if LittleEndian: out.reverse()
-	return "".join(map(chr, out))
-
-# Add byte padding
-def AddPadding(i, pad = 0x10):
-	if i % pad != 0:
-		return i + pad - (i % pad)
-	return i
-
-# Decimal to hexadecimal
-def ToHex(num) -> bytes:
-	return hexlify(num).upper()
-
-# Decode string from data slice and remove trailing break
-def DecodeString(data_slice: bytes):
-	return data_slice.decode("UTF-16LE").split("\0")[0]
-
-def DecompressFilename(compressed_filename: bytes) -> tuple[bytes, bytes, str]:
-	first = ToHex(compressed_filename[:3])
-	second = compressed_filename[3:-2]
-	third = str(AscDec(compressed_filename[-2:], True)).zfill(3)
-
-	return first, second, third
-
-# Seconds since Jan 1st, 1970 converted to date
-def FormattedDateFromEpoch(datecode: bytes):
-	epoch = time.mktime(time.struct_time([2000, 1, 1, 0, 0, 0, 5, 1, -1]))
-
-	seconds = AscDec(datecode, True)
-	unformatted_date = time.gmtime(epoch+seconds)
-
-	return time.strftime(
-		"%A, %B %d, %Y, %I:%M:%S %p", # Dayname, monthname day, year, 12hour:minute:second meridiem
-		unformatted_date
-	)
-
-# Get the size of a sound block
-def GetSoundSize(audio_offset, frame_count, offset, lower_bound=False) -> bytes:
-
-	if lower_bound:
-		return AddPadding(audio_offset+frame_count, 4) + (4+offset)
-
-	return AddPadding(audio_offset+frame_count, 4) + offset
-
-# Converts internally stored filenames to proper strings
-def FilenameToString(file_name: tuple):
-	return "_".join([str(file_name[0])[2:-1], str(file_name[0])[2:-1], str(file_name[2])[2:-1]]) + ".pmm"
-
-
-
 # Exceptions --------------------
 
 # Raise if the provided flipnote isn't valid
 class PPMInvalid(Exception):
     """
-    Raised if the binary data can't be interpreted as PPM data.
+    Raised if the binary raw_data can't be interpreted as PPM raw_data.
     """
 
     def __init__(self, message):
         self.message = message
         super().__init__(self.message)
 
-# Raise if the user tries to access data that wasn't loaded or doesn't exist
+# Raise if the user tries to access raw_data that wasn't loaded or doesn't exist
 class PPMCantLoadData(Exception):
 	"""
-	Raised if an attempt is made to access data that hasn't been loaded.
+	Raised if an attempt is made to access raw_data that hasn't been loaded.
 	"""
 
-	def __init__(self, data="UNKNOWN"):
+	def __init__(self, datatype="UNKNOWN"):
 
-		read_type = data
-		match data:
+		read_type = datatype
+		match datatype:
 			case "Metadata":
 				read_type = "DecodeThumbnail"
 			case "Frames":
@@ -185,25 +110,23 @@ class PPMCantLoadData(Exception):
 			case _:
 				pass
 
-		self.message = f"Attempted to access {data}, but found nothing. Please check your ReadFile() and ReadBytes() calls and be sure you're setting {read_type} = True"
+		self.message = f"Attempted to access {datatype}, but found nothing. Please check your ReadFile() and ReadBytes() calls and be sure you're setting {read_type} = True"
 		super().__init__(self.message)
 
-# Raise if the user tries to access data that wasn't loaded or doesn't exist
+# Raise if the user tries to access raw_data that wasn't loaded or doesn't exist
 class PPMMissingDependency(ModuleNotFoundError):
 	"""
-	Raised if an attempt is made to access data that hasn't been loaded.
+	Raised if an attempt is made to access raw_data that hasn't been loaded.
 	"""
 
 	def __init__(self, module="UNKNOWN"):
 
 		install_note = module
-		match module:
-			case "PIL":
+		match module.lower():
+			case "pil":
 				install_note = "pip install pillow"
 			case "moviepy":
 				install_note = "pip install moviepy"
-			case "FFMPEG":
-				install_note = "https://www.ffmpeg.org/download.html"
 			case _:
 				pass
 
@@ -217,355 +140,224 @@ class PPMMissingDependency(ModuleNotFoundError):
 class PPM:
 
 	# Initialize
-	def __init__(self) -> None:
+	def __init__(self, filename: str | os.PathLike) -> None:
 		"""
-		PPM Parser Class
+		PPM Parser
 		----------------
 
-		Parse PPM files!
-		"""
-
-		self.Loaded = {
-			"Metadata": False,
-			"Frames": False,
-			"Sound": False,
-		}
-		self.Frames = None
-		self.Thumbnail = None
-		self.RawThumbnail = None
-		self.SoundData = None
-		self.InputFileName = None
-
-	# Read flipnote PPM file
-	def ReadFile(
-			self,
-			path: str | os.PathLike,
-			DecodeThumbnail: bool = True,
-			ReadFrames: bool = True,
-			ReadSound: bool = True):
-		"""
-		Read Flipnote from PPM file
-
-		The PPM file will be read as bytes and sent to `PPM.ReadBytes()`.
+		Read a Flipnote PPM File, then format and segment its data into usable strings
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
-		path : str | os.PathLike
-			Path to Flipnote PPM file
-		DecodeThumbnail : bool (defualt = `True`)
-			If true, decode the Flipnote's thumbnail
-		ReadFrames : bool (defualt = `True`)
-			If true, decode the Flipnote's frames
-		ReadSound : bool (defualt = `True`)
-			If true, decode the Flipnote's sound data
-		
-		Returns
-		-------
-		out : ppm_parser.PPM
-			PPM Instance
+		filename : str | os.PathLike
+			Name of the input PPM file to read
 		"""
 
-		self.InputFileName = os.path.basename(path)
+		self.input_filename = os.path.splitext(os.path.basename(filename))[0]
+		self.frames_outdir_name = "img"
+		self.sounds_outdir_name = "snd"
+		self.garbage_collector = []
 
-		with open(path, "rb") as f:
-			return self.ReadBytes(f.read(), DecodeThumbnail, ReadFrames, ReadSound)
-	
-	# Read flipnote bytes
-	def ReadBytes(
-			self,
-			data: bytes,
-			DecodeThumbnail: bool = True,
-			ReadFrames: bool = True,
-			ReadSound: bool = True):
-		"""
-		Read Flipnote from bytes.
+		with open(filename, "rb") as f:
+			raw_data = f.read()
 
-		If you want to read a PPM file, use `PPM.ReadFile()` instead.
+			# Ensure raw_data is PPM
+			if raw_data[:4] != b"PARA": # Check header magic
+				raise PPMInvalid(message=f"Header magic is \"{raw_data[:4]}\" instead of \"PARA\".")
+			if len(raw_data) <= 0x6a0: # Check PPM raw_data length
+				raise PPMInvalid(message=f"Data is {len(raw_data)} bytes long, it should be {str(int(0x6a0))} or longer.")
+			
+			# Read audio raw_data
+			sound_offset = self._ascii2dec(raw_data[4:8], True) + 0x6a0
+			# sound_length = self._ascii2dec(raw_data[8:12], True)
 
-		Parameters
-		----------
-		self : ppm_parser.PPM
-			PPM instance
-		data : bytes
-			Bytes of Flipnote
-		DecodeThumbnail : bool (defualt = `True`)
-			If true, decode the Flipnote's thumbnail
-		ReadFrames : bool (defualt = `True`)
-			If true, decode the Flipnote's frames
-		ReadSound : bool (defualt = `True`)
-			If true, decode the Flipnote's sound data
-		
-		Returns
-		-------
-		out : ppm_parser.PPM
-			PPM Instance
-		"""
+			# Decode metadata
+			self._decode_metadata(raw_data)
 
-		# Ensure data is PPM
-		if data[:4] != b"PARA": # Check header magic
-			raise PPMInvalid(message=f"Header magic is \"{data[:4]}\" instead of \"PARA\".")
-		if len(data) <= 0x6a0: # Check PPM data length
-			raise PPMInvalid(message=f"Data is {len(data)} bytes long, it should be {str(int(0x6a0))} or longer.")
-		
-		# Read audio data
-		Audio_Offset = AscDec(data[4:8], True) + 0x6a0
-		Audio_Length = AscDec(data[8:12], True)
+			# Decode thumbnail
+			self.raw_thumbnail = raw_data[0xa0:0x6a0]
 
-		# Get frame count
-		self.FrameCount = AscDec(data[12:14], True) + 1
+			# True if the flipnote loops, false otherwise
+			self.is_looped = raw_data[0x06A6] >> 1 & 0x01 == 1
 
-		# Set to true if locked, false otherwise
-		self.Locked = data[0x10] & 0x01 == 1
+			# Read animation sequence header
+			anim_offset = 0x6a8 + self._ascii2dec(raw_data[0x6a0:0x6a4], True)
+			frame_offsets = [anim_offset + self._ascii2dec(raw_data[0x06a8+i*4:0x06a8+i*4+4], True) for i in range(self.frame_count)]
 
-		# The frame index of the thumbnail
-		self.ThumbnailFrameIndex = AscDec(data[0x12:0x14], True)
-		
-		# Contributor names
-		self.OriginalAuthorName = str(DecodeString(data[0x14:0x2A]))
-		self.EditorAuthorName = str(DecodeString(data[0x2A:0x40]))
-		self.Username = str(DecodeString(data[0x40:0x56]))
+			# Read what frames have SFX
+			self.sfx_usage = [(i&0x1!=0, i&0x2!=0, i&0x4!=0) for i in raw_data[sound_offset:sound_offset+self.frame_count]]
 
-		# Contributor ID's
-		self.OriginalAuthorID = str(ToHex(data[0x56:0x5e][::-1]))[2:-1]
-		self.EditorAuthorID = str(ToHex(data[0x5E:0x66][::-1]))[2:-1]
+			self._get_sound_size(sound_offset, self.frame_count, 0)
 
-		# ID of the previous editor(?)
-		self.PreviousEditAuthorID = str(ToHex(data[0x8a:0x92][::-1]))[2:-1]
+			sound_size = (
+				self._ascii2dec(raw_data[
+					self._get_sound_size(sound_offset, self.frame_count, 0):
+					self._get_sound_size(sound_offset, self.frame_count, 0, True)], True), # BGM
+				self._ascii2dec(raw_data[
+					self._get_sound_size(sound_offset, self.frame_count, 4):
+					self._get_sound_size(sound_offset, self.frame_count, 4, True)], True), # SFX1
+				self._ascii2dec(raw_data[
+					self._get_sound_size(sound_offset, self.frame_count, 8):
+					self._get_sound_size(sound_offset, self.frame_count, 8, True)], True), # SFX2
+				self._ascii2dec(raw_data[
+					self._get_sound_size(sound_offset, self.frame_count, 12):
+					self._get_sound_size(sound_offset, self.frame_count, 12, True)], True) # SFX3
+			)
 
-		# Filenames (compressed)
-		self.OriginalFilenameC = data[0x66:0x78]
-		self.CurrentFilenameC = data[0x78:0x8a]
+			# Get framespeed
+			self.frame_speed = 8 - raw_data[self._add_padding(sound_offset+self.frame_count, 4) + 16]
+			self.bgm_frame_speed = 8 - raw_data[self._add_padding(sound_offset+self.frame_count, 4) + 17]
 
-		# Get Filenames from compressed names
-		self.OriginalFilename = FilenameToString(DecompressFilename(self.OriginalFilenameC))
-		self.CurrentFilename = FilenameToString(DecompressFilename(self.CurrentFilenameC))
+			# Stream info
+			self.FPS = SPEEDS[self.frame_speed]
+			self.duration = float(self.frame_count) / float(self.FPS)
 
-		# Get embedded date
-		self.Date = FormattedDateFromEpoch(data[0x9a:0x9e])
-
-		# Get raw thumbnail data, and decode it if the user asked to
-		self.RawThumbnail = data[0xa0:0x6a0]
-		if DecodeThumbnail:
-			self.GetThumbnail()
-
-		# Mark metadata as loaded
-		self.Loaded["Metadata"] = True
-
-		# True if the flipnote loops, false otherwise
-		self.Looped = data[0x06A6] >> 1 & 0x01 == 1
-
-		# Read animation sequence header
-		Animation_Offset = 0x6a8 + AscDec(data[0x6a0:0x6a4], True)
-		Frame_Offsets = [Animation_Offset + AscDec(data[0x06a8+i*4:0x06a8+i*4+4], True) for i in range(self.FrameCount)]
-
-		# Read what frames have SFX
-		self.SFXUsage = [(i&0x1!=0, i&0x2!=0, i&0x4!=0) for i in data[Audio_Offset:Audio_Offset+self.FrameCount]]
-
-		GetSoundSize(Audio_Offset, self.FrameCount, 0)
-
-		Sound_Size = (
-			AscDec(data[
-				GetSoundSize(Audio_Offset, self.FrameCount, 0):
-				GetSoundSize(Audio_Offset, self.FrameCount, 0, True)], True), # BGM
-			AscDec(data[
-				GetSoundSize(Audio_Offset, self.FrameCount, 4):
-				GetSoundSize(Audio_Offset, self.FrameCount, 4, True)], True), # SFX1
-			AscDec(data[
-				GetSoundSize(Audio_Offset, self.FrameCount, 8):
-				GetSoundSize(Audio_Offset, self.FrameCount, 8, True)], True), # SFX2
-			AscDec(data[
-				GetSoundSize(Audio_Offset, self.FrameCount, 12):
-				GetSoundSize(Audio_Offset, self.FrameCount, 12, True)], True) # SFX3
-		)
-
-		# Get framespeed
-		self.Framespeed = 8 - data[AddPadding(Audio_Offset+self.FrameCount, 4) + 16]
-		self.BGMFramespeed = 8 - data[AddPadding(Audio_Offset+self.FrameCount, 4) + 17]
-
-		# Decode frames if the user asked to
-		if ReadFrames:
-			self.Frames = []
-			for i, offset in enumerate(Frame_Offsets):
-				#Read frame header
-				Inverted = data[offset] & 0x01 == 0
+			# Decode frames if the user asked to
+			self.raw_frames = []
+			for i, offset in enumerate(frame_offsets):
+				# Read frame header
+				p_is_inverted = raw_data[offset] & 0x01 == 0
 				
-				#Reads which color that will be used
-				Colors = (
-					data[offset] >> 1 & 0x03,
-					data[offset] >> 3 & 0x03
+				# Reads which color that will be used
+				frame_colors = (
+					raw_data[offset] >> 1 & 0x03,
+					raw_data[offset] >> 3 & 0x03
 				)
 				
-				Frame = self.ExtractFrame(data, offset, self.Frames[i-1][2] if i else None)
+				frame = self._decode_frame(raw_data, offset, self.raw_frames[i-1][2] if i else None)
 				
-				self.Frames.append([Inverted, Colors, Frame])
-			
-			# Mark frames as loaded
-			self.Loaded["Frames"] = True
+				self.raw_frames.append([p_is_inverted, frame_colors, frame])
 
-		#Read the Audio:
-		if ReadSound:
-			self.SoundData = []
-			pos = AddPadding(Audio_Offset+self.FrameCount+32, 4)
+			self.raw_sound_data = []
+			sound_position = self._add_padding(sound_offset + self.frame_count + 32, 4)
 			for i in range(4):
-				self.SoundData.append(data[pos:pos+Sound_Size[i]])
-				pos += Sound_Size[i]
+				self.raw_sound_data.append(raw_data[sound_position:sound_position + sound_size[i]])
+				sound_position += sound_size[i]
+
+			print("PPM data organized")
+
+	# ASCII string to decimal
+	def _ascii2dec(self, ascii, LittleEndian = False):
+		ret = 0
+		l = []
+
+		for num in ascii:
+			l.append(num)
+
+		if LittleEndian: l.reverse()
+		for i in l:
+			ret = (ret<<8) | i
 			
-			# Mark sounds as loaded
-			self.Loaded["Sound"] = True
+		return ret
 
-		return self
-	
-	# Get a single frame
-	def GetFrame(self, frame_index: int) -> np.ndarray[bytes]:
+	# Decimal to ASCII string of specified length
+	def _dec2ascii(self, dec, length = None, LittleEndian = False):
+		out = []
+		while dec != 0:
+			out.insert(0, dec&0xFF)
+			dec >>= 8
+		
+		if length:
+			if len(out) > length:
+				out = out[-length:]
+			if len(out) < length:
+				out = [0]*(length-len(out)) + out
+				
+		if LittleEndian: out.reverse()
+		return "".join(map(chr, out))
+
+	# Add byte padding
+	def _add_padding(self, i, pad = 0x10):
+		if i % pad != 0:
+			return i + pad - (i % pad)
+		return i
+
+	# Decimal to hexadecimal
+	def _to_hex(self, num) -> bytes:
+		return hexlify(num).upper()
+
+	# Decode string from raw_data slice and remove trailing break
+	def _decode_string(self, data_slice: bytes):
+		return data_slice.decode("UTF-16LE").split("\0")[0]
+
+	# Converts internally stored filenames to proper strings
+	def _decompress_filename(self, compressed_filename: bytes) -> str:
+		first = self._to_hex(compressed_filename[:3])
+		second = compressed_filename[3:-2]
+		third = str(self._ascii2dec(compressed_filename[-2:], True)).zfill(3)
+
+		return "_".join([str(first)[2:-1], str(second)[2:-1], str(third)[2:-1]]) + ".pmm"
+
+	# Seconds since Jan 1st, 1970 converted to date
+	def _format_date(self, datecode: bytes):
+		epoch = time.mktime(time.struct_time([2000, 1, 1, 0, 0, 0, 5, 1, -1]))
+
+		seconds = self._ascii2dec(datecode, True)
+		unformatted_date = time.gmtime(epoch+seconds)
+
+		return time.strftime(
+			"%A, %B %d, %Y, %I:%M:%S %p", # Dayname, monthname day, year, 12hour:minute:second meridiem
+			unformatted_date
+		)
+
+	# Get the size of a sound block
+	def _get_sound_size(self, audio_offset, frame_count, offset, lower_bound=False) -> bytes:
+
+		if lower_bound:
+			return self._add_padding(audio_offset+frame_count, 4) + (4+offset)
+
+		return self._add_padding(audio_offset+frame_count, 4) + offset
+
+	def _decode_metadata(self, raw_data: bytes) -> None:
 		"""
-		Get a single frame from the loaded Flipnote data.
+		Decode metadata from the Flipnote instance.
 
-		This will only work if `self.ReadFrames = True` when using `PPM.ReadFile()` or `PPM.ReadBytes()`
+		Typically only called when first instantiated.
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
-		frame_index : int
-			Index of the desired frame
-		
-		Returns
-		-------
-		out : ndarray[bytes]
-			Single frame
 		"""
 
-		# Check that frames were loaded
-		if not self.Loaded["Frames"]:
-			raise PPMCantLoadData("Frames")
+		# Get frame count
+		self.frame_count = self._ascii2dec(raw_data[12:14], True) + 1
+
+		# Set to true if locked, false otherwise
+		self.is_locked = raw_data[0x10] & 0x01 == 1
+
+		# The frame index of the thumbnail
+		self.thumbnail_frame_index = self._ascii2dec(raw_data[0x12:0x14], True)
 		
-		inverted, colors, frame = self.Frames[frame_index]
-		
-		# Defines the palette:
-		palette = FRAME_PALETTE[:]
-		if inverted:
-			palette[0], palette[1] = palette[1], palette[0]
+		# Contributor names
+		self.original_author_name = str(self._decode_string(raw_data[0x14:0x2A]))
+		self.editor_author_name = str(self._decode_string(raw_data[0x2A:0x40]))
+		self.username = str(self._decode_string(raw_data[0x40:0x56]))
 
-		color_primary = palette[colors[0]]
-		color_secondary = palette[colors[1]]
-		
-		out = np.zeros((256, 192), dtype=">u4")
-		out[:] = palette[0]
-		out[frame[1]] = color_secondary
-		out[frame[0]] = color_primary
-		
-		return out
-	
-	# Get the thumbnail
-	def GetThumbnail(self) -> np.ndarray[bytes]:
-		"""
-		Get the thumbnail of the loaded Flipnote data.
+		# Contributor ID's
+		self.original_author_id = str(self._to_hex(raw_data[0x56:0x5e][::-1]))[2:-1]
+		self.editor_author_id = str(self._to_hex(raw_data[0x5E:0x66][::-1]))[2:-1]
 
-		This will only work if `self.DecodeThumbnail = True` when using `PPM.ReadFile()` or `PPM.ReadBytes()`
+		# ID of the previous editor(?)
+		self.prevedit_author_id = str(self._to_hex(raw_data[0x8a:0x92][::-1]))[2:-1]
 
-		Parameters
-		----------
-		self : ppm_parser.PPM
-			PPM instance
-		
-		Returns
-		-------
-		out : ndarray[bytes]
-			Single frame
-		"""
+		# Get Filenames from compressed names
+		self.original_internal_filename = self._decompress_filename(raw_data[0x66:0x78])
+		self.current_internal_filename = self._decompress_filename(raw_data[0x78:0x8a])
 
-		if not self.RawThumbnail:
-			PPMCantLoadData("Thumbnail")
-		
-		out = np.zeros((64, 48), dtype=">u4")
-		
-		#speedup:
-		palette = THUMB_PALETTE
-		
-		#8x8 tiling:
-		for ty in range(6):
-			for tx in range(8):
-				for y in range(8):
-					for x in range(0,8,2):
-						#two colors stored in each byte:
-						byte = self.RawThumbnail[int((ty*512+tx*64+y*8+x)/2)]
-						out[x+tx*8  , y+ty*8] = palette[byte & 0xF]
-						out[x+tx*8+1, y+ty*8] = palette[byte >> 4]
-		
-		self.Thumbnail = out
-		return self.Thumbnail
-	
-	def GetSound(self, sound_index: int, output_path: str | os.PathLike | None = None, sample_rate: int = 8192):
-		"""
-		Get a sound from the specified index in the Flipnote data.
+		# Get embedded date
+		self.creation_date = self._format_date(raw_data[0x9a:0x9e])
 
-		This will only work if `self.ReadSound = True` when using `PPM.ReadFile()` or `PPM.ReadBytes()`
-
-		Parameters
-		----------
-		self : ppm_parser.PPM
-			PPM instance
-		sound_index : int
-			Index of the desired sound.
-			- 0 = BGM
-			- 1 = SFX1
-			- 2 = SFX2
-			- 3 = SFX3
-		output_path : str | os.PathLike | None (default = None)
-			Path to output the desired audio. If None, then it will be returned as bytes
-		sample_rate : int (default = 8192)
-			Sample rate to export the audio at. `8192` is a Flipnote's default sample rate
-		
-		Returns
-		-------
-		out : bytes | None
-			Sound data is returned as bytes if output_path = None
-		"""
-
-		if not self.Loaded["Sound"]:
-			PPMCantLoadData("Sound")
-
-		if self.SoundData[sound_index]:
-			# Reverse nibbles:
-			data = []
-			for i in self.SoundData[sound_index]:
-				data.append((i&0xF)<< 4 | (i>>4))
-			
-			data = bytes(data)
-			
-			# 4bit ADPCM decode
-			decoded = audioop.adpcm2lin(data, 2, None)[0]
-			
-			# Output bytes if there is no output path
-			if not output_path:
-				return decoded
-
-			# Name out file and concatenate it with output path
-			out_file = os.path.join(output_path, f"{SOUND_NAMES[sound_index]}.wav")
-
-			# Rename file if the sample rate is different than the defualt
-			if sample_rate != 8192:
-				out_file = os.path.join(output_path, f"{SOUND_NAMES[sound_index]}_{str(int(sample_rate))}Hz.wav")
-
-			# Write wav file
-			with wave.open(out_file, "wb") as f:
-				f.setnchannels(1)
-				f.setsampwidth(2)
-				f.setframerate(sample_rate)
-				f.writeframes(decoded)
-
-			return out_file
-		
-	# Extract frame
-	def ExtractFrame(self, data: bytes, offset: int, prev_frame = None) -> np.ndarray:
+	# Decode frame
+	def _decode_frame(self, raw_data: bytes, offset: int, previous_frame = None) -> np.ndarray:
 		"""
 		Extract a frame from the Flipnote data via its offset
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
 		data : bytes
 			The PPM byte stream
@@ -575,34 +367,34 @@ class PPM:
 		Returns
 		-------
 		out : ndarray
-			Frame of flipnote
+			frame of flipnote
 		"""
 		
-		Encoding = [[], []]
-		Frame = np.zeros((2, 256, 192), dtype=np.bool_)
+		encoding = [[], []]
+		frame = np.zeros((2, 256, 192), dtype=np.bool_)
 		
 		# Read tags:
-		New_Frame = data[offset] & 0x80 != 0
-		Unknown = data[offset] >> 5 & 0x03
+		new_frame = raw_data[offset] & 0x80 != 0
+		unknown_tag = raw_data[offset] >> 5 & 0x03
 		
 		offset += 1
 		
-		Frame_Move = [0,0]
-		if Unknown & 0x2: # Doesn't work 100%...
-			print("Frame_Move at offset ", offset-1)
+		frame_move = [0,0]
+		if unknown_tag & 0x2: # Doesn't work 100%...
+			print("frame_move at offset ", offset-1)
 			
-			move_x = AscDec(data[offset+0:offset+1], True)
-			move_y = AscDec(data[offset+1:offset+2], True)
-			Frame_Move[0] = move_x if move_x <= 127 else move_x-256
-			Frame_Move[1] = move_y if move_y <= 127 else move_y-256
+			move_x = self._ascii2dec(raw_data[offset+0:offset+1], True)
+			move_y = self._ascii2dec(raw_data[offset+1:offset+2], True)
+			frame_move[0] = move_x if move_x <= 127 else move_x-256
+			frame_move[1] = move_y if move_y <= 127 else move_y-256
 			offset += 2
-		elif Unknown:
-			print("Unknown tags: ", Unknown, "at offset ", offset-1)
+		elif unknown_tag:
+			print("Unknown tags: ", unknown_tag, "at offset ", offset-1)
 		
 		# Read the line encoding of the layers:
 		for layer in range(2):
-			for byte in data[offset:offset + 48]:
-				Encoding[layer].extend(
+			for byte in raw_data[offset:offset + 48]:
+				encoding[layer].extend(
 					[
 						byte & 0x03,
 						byte >> 2 & 0x03,
@@ -617,180 +409,230 @@ class PPM:
 			for y in range(192):
 				
 				# Match encoding layer
-				match Encoding[layer][y]:
+				match encoding[layer][y]:
 					case 1: # Normal
-						UseByte = AscDec(data[offset:offset+4])
+						use_byte = self._ascii2dec(raw_data[offset:offset+4])
 						offset += 4
 						x = 0
-						while UseByte & 0xFFFFFFFF:
-							if UseByte & 0x80000000:
-								byte = data[offset]
+						while use_byte & 0xFFFFFFFF:
+							if use_byte & 0x80000000:
+								byte = raw_data[offset]
 								offset += 1
 								for _ in range(8):
 									if byte & 0x01:
-										Frame[layer][x][y] = True
+										frame[layer][x][y] = True
 									x += 1
 									byte >>= 1
 							else:
 								x += 8
-							UseByte <<= 1
+							use_byte <<= 1
 					case 2: # Inverted
-						UseByte = AscDec(data[offset:offset+4])
+						use_byte = self._ascii2dec(raw_data[offset:offset+4])
 						offset += 4
 						x = 0
-						while UseByte & 0xFFFFFFFF:
-							if UseByte & 0x80000000:
-								byte = data[offset]
+						while use_byte & 0xFFFFFFFF:
+							if use_byte & 0x80000000:
+								byte = raw_data[offset]
 								offset += 1
 								for _ in range(8):
 									if not byte & 0x01:
-										Frame[layer, x, y] = True
+										frame[layer, x, y] = True
 									x += 1
 									byte >>= 1
 							else:
 								x += 8
-							UseByte <<= 1
+							use_byte <<= 1
 						for n in range(256):
-							Frame[layer, n, y] = not Frame[layer, n, y]
+							frame[layer, n, y] = not frame[layer, n, y]
 					case 3: 
 						x = 0
 						for _ in range(32):
-							byte = data[offset]
+							byte = raw_data[offset]
 							offset += 1
 							for _ in range(8):
 								if byte & 0x01:
-									Frame[layer, x, y] = True
+									frame[layer, x, y] = True
 								x += 1
 								byte >>= 1
 					case _: # Nothing
 						pass
 
 		
-		# Merges this frame with the previous frame if New_Frame isn't true:
-		if not New_Frame and prev_frame.all() != None: # Maybe optimize this better for numpy...
-			if Frame_Move[0] or Frame_Move[1]: # Moves the previous frame if specified:
-				New_Prev_Frame = np.zeros((2, 256, 192), dtype=np.bool_)
+		# Merges this frame with the previous frame if new_frame isn't true:
+		if not new_frame and previous_frame.all() != None: # Maybe optimize this better for numpy...
+			if frame_move[0] or frame_move[1]: # Moves the previous frame if specified:
+				new_previous_frame = np.zeros((2, 256, 192), dtype=np.bool_)
 				
 				for y in range(192): # This still isn't perfected
 					for x in range(256):
-						Temp_X = x+Frame_Move[0]
-						Temp_Y = y+Frame_Move[1]
+						Temp_X = x+frame_move[0]
+						Temp_Y = y+frame_move[1]
 						if 0 <= Temp_X < 256 and 0 <= Temp_Y < 192:
-							New_Prev_Frame[0, Temp_X, Temp_Y] = prev_frame[0, x, y]
-							New_Prev_Frame[1, Temp_X, Temp_Y] = prev_frame[1, x, y]
+							new_previous_frame[0, Temp_X, Temp_Y] = previous_frame[0, x, y]
+							new_previous_frame[1, Temp_X, Temp_Y] = previous_frame[1, x, y]
 				
-				prev_frame = New_Prev_Frame
+				previous_frame = new_previous_frame
 			
 			# Merge the frames:
-			Frame ^= prev_frame
+			frame ^= previous_frame
 		
-		return Frame
+		return frame
 	
-	def WriteImage(self, image: bytes, frame_index: int, output_path: str | os.PathLike, sclae_factor: int = 1) -> Image.Image:
-		"""
-		Write a PPM frame to a PNG image file using byte data and PIL
+	def _wav_file_setup(self, filename: str | os.PathLike, sample_rate: float, data: bytes):
+		with wave.open(filename, "wb") as f:
+			f.setnchannels(1)
+			f.setsampwidth(2)
+			f.setframerate(sample_rate)
+			f.writeframes(data)
+		
+		f.close()
+		del f
 
-		Note: This function requires PIL to be installed. Install it via `pip install pillow`
+	def _clean_up_garbage(self):
+		if not self.garbage_collector:
+			return None
+		
+		for garbage in self.garbage_collector:
+			garbage.close()
+			del garbage
+
+	# Converts the raw thumbnail data into a NumPy array
+	def raw_thumbnail_to_array(self) -> np.ndarray[bytes]:
+		"""
+		Converts the FLipnote's raw thumbnail to an image byte array using Flipnote palette data. This output can be used with NumPy directly or loaded as raw data by other Python image libraries.
+
+		Native Flipnote thumbnail resolution is `64px x 48px`.
+
+		This function is executed automatically when calling `export_thumbnail()`.
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
-		image : bytes
-			Image in bytes
-		frame_index : int
-			Index of the desired frame. Padded to 3 digits (e.g. `012` instead of `12`)
-		output_path : str | os.PathLike
-			Output path for the image
-		sclae_factor : int (default = 1)
-			Factor to upscale the image by
 		
 		Returns
 		-------
-		out : Image.Image
-			PIL image of the desired frame
+		out : ndarray[bytes]
+			Flipnote thumbnail with proper palette as a NumPy array
 		"""
 
-		global HAS_PIL
-
-		if not HAS_PIL:
-			raise PPMMissingDependency("PIL")
-
-		new_image = image
-		if sclae_factor > 1:
-			new_image = np.repeat(np.repeat(image, sclae_factor, axis = 0), sclae_factor, axis = 1)
-
-		out = new_image.tostring("F")	
-		out = Image.frombytes("RGBA", (len(new_image), len(new_image[0])), out)
+		thumbnail_data = self.raw_thumbnail
 		
-		full_output_path = os.path.join(output_path, f"{str(frame_index).zfill(3)}.png")
-		out.save(full_output_path, format="PNG")
+		thumbnail_out = np.zeros((64, 48), dtype=">u4")
 		
-		return out
-	
-	# Dump frames to PNG
-	def DumpFrames(self, output_path: str | os.PathLike, scale_factor: int = 1) -> None:
+		#speedup:
+		palette = THUMB_PALETTE
+		
+		#8x8 tiling:
+		for ty in range(6):
+			for tx in range(8):
+				for y in range(8):
+					for x in range(0,8,2):
+						#two colors stored in each byte:
+						byte = thumbnail_data[int((ty*512+tx*64+y*8+x)/2)]
+						thumbnail_out[x+tx*8, y+ty*8] = palette[byte & 0xF]
+						thumbnail_out[x+tx*8+1, y+ty*8] = palette[byte >> 4]
+		
+		return thumbnail_out
+
+	# Convert a frame into a NumPy array
+	def raw_frame_to_array(self, frame_index: int) -> np.ndarray[bytes]:
 		"""
-		Dump all frames in a PPM to PNG
+		Converts the raw frame data at the specified index from `self.raw_frames` to an image byte array using Flipnote palette data. This output can be used with NumPy directly or loaded as raw data by other Python image libraries.
+
+		Native Flipnote frame resolution is `256px x 192px`.
+
+		This function is executed automatically when calling `export_frames()`.
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
-		output_path : str | os.PathLike
-			Output path for the PNG images
-		sclae_factor : int (default = 1)
-			Factor to upscale all frames by
-			- 1 = Native (256px x 192px)
-			- 2 = Double (512px x 384px) 
-			- 4 = Quadruple (1024px x 768px)
-			- ...
+		frame_index : int
+			Index of the desired raw frame data within `self.raw_frames`
+		
+		Returns
+		-------
+		out : ndarray[bytes]
+			Specified frame with proper palette as a NumPy array
 		"""
+		
+		frame_inverted, frame_colors, frame = self.raw_frames[frame_index]
+		
+		# Defines the palette:
+		palette = FRAME_PALETTE[:]
+		if frame_inverted:
+			palette[0], palette[1] = palette[1], palette[0]
 
-		for i in range(self.FrameCount):
-			print(f"Exporting frame {i+1} of {self.FrameCount}")
-			self.WriteImage(self.GetFrame(i), i, output_path, scale_factor)
-
-	def CheckIfSoundDataExists(self) -> bool:
-		if all(len(sound) <= 0 for sound in self.SoundData):
-			return False
+		color_primary = palette[frame_colors[0]]
+		color_secondary = palette[frame_colors[1]]
+		
+		frame_out = np.zeros((256, 192), dtype=">u4")
+		frame_out[:] = palette[0]
+		frame_out[frame[1]] = color_secondary
+		frame_out[frame[0]] = color_primary
+		
+		return frame_out
 	
-		return True
-
-	# Dump sound files to WAV
-	def DumpSoundFiles(self, output_path: str | os.PathLike) -> bool:
+	# Decode sound data to 4bit ADPCM
+	def sound_data_to_4bit_adpcm(self, sound_index: int) -> bytes | None:
 		"""
-		Dump all audio in a PPM to WAV
+		Converts the raw sound data from `self.raw_sound_data` to 4bit ADPCM bytes. This output can be used with other Python audio libraries directly.
+
+		Native Flipnote sound data is 1 channel, has a sample width of 2 bytes, and a sample rate of 8192Hz.
+
+		This function is executed automatically when calling `export_sounds()`.
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
-		output_path : str | os.PathLike
-			Output path for the WAV files
+		sound_index : int
+			Index of the desired raw frame data within `self.raw_sound_data`
+			- 0 = BGM
+			- 1 = SFX1
+			- 2 = SFX2
+			- 3 = SFX3
+		
+		Returns
+		-------
+		out : bytes | None
+			Specified sound data as 4bit ADPCM bytes. WIll be `None` if the specified `sound_index` contains no data
 		"""
 
-		for i, data in enumerate(self.SoundData):
+		# If the sound data doesn't exist
+		if not self.raw_sound_data[sound_index]:
+			return None
+		
+		# Perform bitshifting
+		shifted_sound_data = []
+		for i in self.raw_sound_data[sound_index]:
+			shifted_sound_data.append((i&0xF)<< 4 | (i>>4))
+		
+		# Return to bytes
+		shifted_sound_data = bytes(shifted_sound_data)
+		
+		# 4bit ADPCM decode
+		sound_out = audioop.adpcm2lin(shifted_sound_data, 2, None)[0]
 
-			# Skip empty data
-			if not data:
-				continue
-
-			self.GetSound(i, output_path)
-
-	def DumpSFXUsage(self):
+		# Return organized dictionary
+		return sound_out
+	
+	def sfx_usage_to_dict(self):
 		"""
-		Returns a dictionary of SFX usage where each key is an SFX file (e.g. `SFX1.wav`) and the values of each key are frame indicies where they should play
+		Returns a dictionary of SFX usage where each key is one of the three SFX (e.g. `SFX1`) and the values of each key are a list of frame indexes which they play.
+
+		This function is executed automatically when calling `export_video()`.
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
 
 		Returns
 		-------
 		out : dict[str, list[int]]
-			Dictionary containg lists of each frame index where a sound effect should play for each soudn effect
+			Dictionary containg lists of each frame index where a sound effect should play for all three sound effects
 		"""
 
 		sfx_frames = {
@@ -799,328 +641,693 @@ class PPM:
 			"SFX3": []
 		}
 
-		for frame, three_sfx in enumerate(self.SFXUsage):
+		for frame, three_sfx in enumerate(self.sfx_usage):
 			for idx, sfx in enumerate(three_sfx):
 				if sfx:
 					sfx_frames[list(sfx_frames.keys())[idx]].append(frame)
 
 		return sfx_frames
-	
-	# Get flipnote speed, FPS, and duration for video or GIF encoding
-	def GetAnimationStreamSettings(self) -> tuple[int, float, float]:
+
+	def exported_frames_to_image_sequence_clip(self, frames_dir: str | os.PathLike) -> ImageSequenceClip:
 		"""
-		Returns the flipnote's animation settings in traditional formats
+		Thsi will merge exported Flipnote frames to an ImageSequenceClip in MoviePy.
+
+		This function is executed automatically when calling `export_video()`.
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
-
-		Returns
-		-------
-		out : tuple[int, flaot, float]
-			Tuple containing the speed, FPS, and duration (in seconds) of the flipnote
-		"""
-
-		speed = int(self.Framespeed)
-		fps = SPEEDS[speed]
-		duration = float(self.FrameCount) / float(fps)
-
-		return speed, fps, duration
-	
-	# Create Image sequence from loaded PNG frames
-	def CreateImageSequence(self, images_dir: str | os.PathLike, fps: float) -> ImageSequenceClip:
-		"""
-		Creates an `ImageSequenceClip` with moviepy using images from the provided directory.
-
-		Parameters
-		----------
-		self : ppm_parser.PPM
-			PPM instance
-		images_dir : str | os.PathLike
-			Directory containing frames
-		fps : float
-			Frames per second of the Flipnote
+		frames_dir : str | os.PathLike
+			Directory containing frames exported with `export_frames()`
 
 		Returns
 		-------
 		out : ImageSequenceClip
-			Image sequence object containing all frames in the provided directory at the given FPS
+			MoviePy ImageSequenceClip containing all exported frames from `frames_dir` at `self.FPS`
 		"""
-
-		global HAS_MOVIEPY
 
 		if not HAS_MOVIEPY:
 			raise PPMMissingDependency("moviepy")
 
-		images = glob.glob(os.path.join(images_dir, "*.png"))
-		images.sort()
+		frames = glob.glob(os.path.join(frames_dir, "*.*"))
+		frames.sort()
 
-		return ImageSequenceClip(images, fps)
+		return ImageSequenceClip(frames, self.FPS)
 	
-	# Set up BGM track and speed + pitch it accordingly
-	def SetBGM(self, sounds_dir: str | os.PathLike, fps: float) -> AudioFileClip:
+	def compose_audio(self, sounds_dir: str | os.PathLike) -> CompositeAudioClip | None:
 		"""
-		Creates an `AudioFileClip` with moviepy using BGM from the provided sounds directory.
+		Thsi will arrange and merge exported Flipnote sounds to a CompositeAudioClip in MoviePy.
+
+		This function is executed automatically when calling `export_video()`.
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
 		sounds_dir : str | os.PathLike
-			Directory containing sound files
-		fps : float
-			Frames per second of the Flipnote
+			Directory containing sounds exported with `export_sounds()`
 
 		Returns
 		-------
-		out : AudioFileClip
-			Audio clip of the processed BGM
+		out : CompositeAudioClip | None
+			MoviePy CompositeAudioClip with the BGM and SFX fully composed. Returns `None` if there's no sound data
 		"""
 
-		global HAS_MOVIEPY
+		all_sounds = []
 
-		if not HAS_MOVIEPY:
-			raise PPMMissingDependency("moviepy")
+		# Load BGM
+		if self.raw_sound_data[0]:
+			bgm_clip = AudioFileClip(os.path.join(sounds_dir, "BGM.wav"))
+			all_sounds.append(bgm_clip)
 
-		normal_rate = 8192
-		new_rate = normal_rate * (float(fps) / SPEEDS[self.BGMFramespeed])
+		# Get SFX usage map
+		sfx_map = self.sfx_usage_to_dict()
+		
+		for sfx_name, sfx_frames in sfx_map.items():
 
-		bgm_file = os.path.join(sounds_dir, f"{SOUND_NAMES[0]}.wav")
-		bgm_out = AudioFileClip(bgm_file)
+			if not sfx_frames:
+				continue
 
-		# If the sample rate is different, create a new BGM file
-		if normal_rate != new_rate:
-			bgm_out = AudioFileClip(self.GetSound(0, sounds_dir, new_rate))
+			sfx_file = os.path.join(sounds_dir, f"{sfx_name}.wav")
+			for frame_index in sfx_frames:
+				start_time = frame_index / self.FPS
+
+				sfx_clip = AudioFileClip(sfx_file)
+				sfx_clip = sfx_clip.set_start(start_time)
+				all_sounds.append(sfx_clip)
+
+		if not all_sounds:
+			return None
+		
+		final_audio = CompositeAudioClip(all_sounds)
+
+		self.garbage_collector + all_sounds + [final_audio]
+
+		return final_audio
 	
-		return bgm_out
-
-	# Place SFX on the frames they should play
-	def SetSFX(self, sfx_file: str | os.PathLike, fps: float, frame: int) -> AudioFileClip:
+	def export_metadata(self, filename_or_path: str | os.PathLike) -> None:
 		"""
-		Creates an `AudioFileClip` with moviepy using BGM from the provided sounds directory.
+		Exports the metadata from the Flipnote to a JSON file at the specified output filename or path.
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
-		sfx_file : str | os.PathLike
-			Specific sound file to use
-		fps : float
-			Frames per second of the Flipnote
-		frame : int
-			The frame of the Flipnote the sound effect should start on
-
-		Returns
-		-------
-		out : AudioFileClip
-			Audio clip of the SFX starting at the specified frame
+		filename_or_path : str | os.PathLike
+			Output filename or path for the image(s). If a filename is given (e.g. `mymetadata.json`), its name will be the given filename and its format be forced to JSON if it isn't already. If only a path is given (e.g. `/mydir1/mydir2`), its name will be `self.input_filename` suffixed with `metadata` and in JSON format.
 		"""
+		
+		# Make path absolute and break base to check if its a file
+		dir_name, base_name = os.path.abspath(os.path.dirname(filename_or_path)), os.path.basename(filename_or_path)
+		file_name, file_extension = os.path.splitext(base_name)
 
-		sfx_clip = AudioFileClip(sfx_file)
-		start_time = frame / fps
-		return sfx_clip.set_start(start_time)
+		if file_extension:
+			if not os.path.isdir(dir_name):
+				os.makedirs(dir_name)
+		else:
+			if not os.path.isdir(filename_or_path):
+				os.makedirs(filename_or_path)
+
+		if file_extension:
+			# Default is to assume the base_name of the path is a file and notate it as a file
+			final_file = os.path.join(dir_name, f"{file_name}.json")
+		else:
+			# Check to see if a file extension was set, and if not, assume Base_name is a dir and not a file
+			final_file = os.path.join(filename_or_path, f"{self.input_filename}_metadata.json")
+
+		metadata = {
+			"Input file name": self.input_filename,
+			"Original file name": self.original_internal_filename,
+			"Current file name": self.current_internal_filename,
+			"Original author": {
+				"Username": self.original_author_name,
+				"ID": self.original_author_id
+			},
+			"Editor": {
+				"Username": self.editor_author_name,
+				"ID": self.editor_author_id
+			},
+			"Previous editor ID": self.prevedit_author_id,
+			"Flipnote Studio username": self.username,
+			"Date created": self.creation_date,
+			"Is locked": self.is_locked,
+			"Is looped": self.is_looped,
+			"Frame count": int(self.frame_count),
+			"Thumbnail frame number": int(self.thumbnail_frame_index) + 1,
+			"Frame speed": float(self.frame_speed),
+			"BGM speed": float(self.bgm_frame_speed),
+		}
+
+		with open(final_file, "w") as f:
+			json.dump(metadata, f, indent=4)
 	
-	def CompositeAudio(self, sounds_dir: str | os.PathLike, fps: float) -> CompositeAudioClip:
+	def export_thumbnail(self,
+			filename_or_path: str | os.PathLike,
+			scale_factor: int = 1) -> None:
 		"""
-		Creates a `CompositeAudioClip` with moviepy which combines the BGM and SFX together.
+		Exports the thumbnail image from the Flipnote to the specified output filename or path at the given scale factor.
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
-		sounds_dir : str | os.PathLike
-			Directory containing sound files
-		fps : float
-			Frames per second of the Flipnote
-
-		Returns
-		-------
-		out : CompositeAudioClip
-			Composited BGM and SFX audio
+		filename_or_path : str | os.PathLike
+			Output filename or path for the image(s). If a filename is given (e.g. `mythumbnail.jpg`), its name will be the given filename and its format will be determined by the file extension. If only a path is given (e.g. `/mydir1/mydir2`), its name will be set to `self.input_filename` suffixed with `thumbnail` and its format will default to PNG.
+		scale_factor : int (default = 1)
+			Factor to upscale the image by
+			- 1 = Native `64px x 48px`
+			- 2 = 2x upscale `128px x 96px`
+			- 4 = 4x upscale `256px x 192px`
+			- ...
 		"""
-		
-		global HAS_MOVIEPY
-
-		if not HAS_MOVIEPY:
-			raise PPMMissingDependency("moviepy")
-		
-		final_sounds = []
-
-		# If BGM exists, set its speed and place it
-		if self.SoundData[0]:
-			final_sounds.append(self.SetBGM(sounds_dir, fps))
-
-		# If there are sounds beyond the BGM, get them
-		if len(self.SoundData) > 1:
-
-			# Get SFX usage as a dictionary with frame indicies
-			sfx_frames = self.DumpSFXUsage()
-
-			for idx, sfx_data in enumerate(self.SoundData[1:]):
-
-				# Skip if the SFX is empty
-				if not sfx_data:
-					continue
-				
-				# Get the name of the current SFX
-				current = SOUND_NAMES[idx+1]
-
-				# For each frame that needs a sound effect in the current SFX, append it at that frame
-				for frame in sfx_frames[current]:
-					final_sounds.append(self.SetSFX(os.path.join(sounds_dir, f"{current}.wav"), fps, frame))
-
-		return CompositeAudioClip(final_sounds)
-
-	# Export video file
-	def ExportVideo(self,
-		output_filename: str,
-		output_dir: str | os.PathLike,
-		fps: float,
-		image_sequence: ImageSequenceClip,
-		audio_composite: CompositeAudioClip | None = None,
-		force_final_frame: bool = True,
-		video_format: str = "mp4",
-		video_codec: str = "libx264",
-		audio_codec: str = "aac") -> None:
-		"""
-		Exports a Flipnote as a video using the specified codecs
-
-		Parameters
-		----------
-		self : ppm_parser.PPM
-			PPM instance
-		output_filename : str
-			Name of the video file
-		output_dir : str | os.PathLike
-			Folder to output the video to
-		fps : float
-			Frames per second of the Flipnote
-		image_sequence : ImageSequenceClip
-			Image sequence containing all the frames of the Flipnote
-		audio_composite : CompositeAudioClip | None (default = `None`)
-			Audio composite of all sounds in the Flipnote, keep as None if Flipnote has no audio
-		force_final_frame : bool (default = `True`)
-			Forces the video to end after the last frame of animation has played. If false, any SFX played near the end of a Flipnote will cause the video to linger on the final frame while they finish playing
-		video_format : str (defualt = `"mp4"`)
-			Video format as a file extension, defualts to MP4
-		video_codec : str (defualt = `"libx264"`)
-			Video codec for export, defualt is moviepy's default of `"libx264"`
-		audio_codec : str (defualt = `"aac"`)
-			Audio codec for the video, defualt is `"aac"` for compatibility range
-		"""
-
-		global HAS_MOVIEPY
-
-		if not HAS_MOVIEPY:
-			raise PPMMissingDependency("moviepy")
-
-		# Initialize video
-		video = image_sequence
-
-		# If there is audio
-		if audio_composite:
-			# Combine the video and merged audio
-			video = image_sequence.set_audio(audio_composite)
-
-		# Force video to end after Flipnote final frame, doesn't really do much if there's no sound
-		if force_final_frame:
-			_, _, duration = self.GetAnimationStreamSettings()
-			video = video.set_duration(duration)
-
-		# Export MP4
-		video.write_videofile(os.path.join(output_dir, f"{output_filename}.{video_format}"), fps=fps, codec=video_codec, audio_codec=audio_codec)
-			
-	def ExportGIF(self, output_filename: str, output_dir: str | os.PathLike, fps: float, image_sequence: ImageSequenceClip) -> None:
-		"""
-		Exports a Flipnote as a GIF file
-
-		Parameters
-		----------
-		self : ppm_parser.PPM
-			PPM instance
-		output_filename : str
-			Name of the video file
-		output_dir : str | os.PathLike
-			Folder to output the GIF to
-		fps : float
-			Frames per second of the Flipnote
-		image_sequence : ImageSequenceClip
-			Image sequence containing all the frames of the Flipnote
-		"""
-		
-		global HAS_MOVIEPY
-
-		if not HAS_MOVIEPY:
-			raise PPMMissingDependency("moviepy")
-		
-		# Export GIF
-		image_sequence.write_gif(os.path.join(output_dir, f"{output_filename}.gif"), fps=fps)
-
-	def ExportThumbnail(self, output_dir: str | os.PathLike, thumbnail_file_name: str = "thumbnail") -> None:
-		"""
-		Exports the Flipnote's thumbnail as a PNG image
-
-		Parameters
-		----------
-		self : ppm_parser.PPM
-			PPM instance
-		output_dir : str | os.PathLike
-			Folder to output the iamge to
-		thumbnail_file_name : str (default = `"thumbnail"`)
-			Name to give the thumbnail image on export
-		"""
-
-		global HAS_PIL
 
 		if not HAS_PIL:
 			raise PPMMissingDependency("PIL")
 		
-		thumb = self.GetThumbnail()
+		# Make path absolute and break base to check if its a file
+		dir_name, base_name = os.path.abspath(os.path.dirname(filename_or_path)), os.path.basename(filename_or_path)
+		file_name, file_extension = os.path.splitext(base_name)
 
-		thumb_out = thumb.tostring("F")	
-		thumb_out = Image.frombytes("RGBA", (len(thumb), len(thumb[0])), thumb_out)
+		if file_extension:
+			if not os.path.isdir(dir_name):
+				os.makedirs(dir_name)
+		else:
+			if not os.path.isdir(filename_or_path):
+				os.makedirs(filename_or_path)
+
+		thumbnail_array = self.raw_thumbnail_to_array()
+
+		# Adjust for scale factor
+		if scale_factor > 1:
+			thumbnail_array = np.repeat(np.repeat(thumbnail_array, scale_factor, axis = 0), scale_factor, axis = 1)
+
+		# Pass NumPy array to PIL
+		out = thumbnail_array.tostring("F")	
+		with Image.frombytes("RGBA", (len(thumbnail_array), len(thumbnail_array[0])), out) as out:
+
+			if file_extension:
+				if file_extension == ".ppm":
+					file_extension = ".png"
+				# Default is to assume the base_name of the path is a file and notate it as a file
+				final_file = os.path.join(dir_name, f"{file_name}{file_extension}")
+			else:
+				# Check to see if a file extension was set, and if not, assume Base_name is a dir and not a file
+				final_file = os.path.join(filename_or_path, f"{self.input_filename}_thumbnail.png")
+			
+			# Output image
+			print(f"Exporting thumbnail image {os.path.basename(final_file)}")
+			out.save(final_file)
+
+		out.close()
+		del out
 	
-		thumb_out.save(os.path.join(output_dir, f"{thumbnail_file_name}.png"), format="PNG")
-
-	def ExportMetadata(self, output_dir: str | os.PathLike, metadata_file_name: str = "metadata"):
+	def export_frames(self,
+			filename_or_path: str | os.PathLike,
+			frame_indexes: Iterable[int] | None = None,
+			scale_factor: int = 1) -> None:
 		"""
-		Exports the Flipnote's metadata to a JSON file
+		Exports any number of frames from the Flipnote to the specified output filename or path at the given scale factor.
+
+		When `frame_indexes = None`, all frames will be exported.
 
 		Parameters
 		----------
-		self : ppm_parser.PPM
+		self : PPM
 			PPM instance
-		output_dir : str | os.PathLike
-			Folder to output the JSON file to
-		metadata_file_name : str (default = `"metadata"`)
-			Name to give the metadata file on export
+		filename_or_path : str | os.PathLike
+			Output filename or path for the image(s). If a filename is given (e.g. `myframe.jpg`), its name will be suffixed with the `frame_index` padded to 3 digits and its format will be determined by the file extension. If only a path is given (e.g. `/mydir1/mydir2`), all frames will be named with only their `frame_index` padded to 3 digits and its format will default to PNG.
+		frame_indexes : Iterable[int] | None (default = None)
+			An iterable containing indexes of the desired raw frame data within `self.raw_frames`. If `None`, all frames will be exported
+		scale_factor : int (default = 1)
+			Factor to upscale the image by
+			- 1 = Native `256px x 192px`
+			- 2 = 2x upscale `512px x 384px`
+			- 4 = 4x upscale `1024px x 768px`
+			- ...
 		"""
 
-		filename = os.path.join(output_dir, f"{metadata_file_name}.json")
+		if not HAS_PIL:
+			raise PPMMissingDependency("PIL")
+		
+		# Make path absolute and break base to check if its a file
+		dir_name, base_name = os.path.abspath(os.path.dirname(filename_or_path)), os.path.basename(filename_or_path)
+		file_name, file_extension = os.path.splitext(base_name)
 
-		metadata = {
-			"Input file name": self.InputFileName,
-			"Original file name": self.OriginalFilename,
-			"Current file name": self.CurrentFilename,
-			"Original author": {
-				"Username": self.OriginalAuthorName,
-				"ID": self.OriginalAuthorID
-			},
-			"Editor": {
-				"Username": self.EditorAuthorName,
-				"ID": self.EditorAuthorID
-			},
-			"Previous Editor ID": self.PreviousEditAuthorID[2:-1],
-			"Username of Flipnote possessor": self.Username,
-			"Date created": self.Date,
-			"Is locked": self.Locked,
-			"Is looped": self.Looped,
-			"Frame count": int(self.FrameCount),
-			"Thumbnail frame number": int(self.ThumbnailFrameIndex) + 1,
-			"Frame speed": float(self.Framespeed),
-			"BGM speed": float(self.BGMFramespeed),
-		}
+		# Overwrite the indexes range if the user just wants to export everything
+		if frame_indexes is None:
+			frame_indexes = range(self.frame_count)
+		# If not exporting all, check to see if the input is a list or tuple, and make it a set for minor speedup
+		elif type(frame_indexes) in [list, tuple]:
+			frame_indexes = set(frame_indexes)
 
-		with open(filename, "w") as f:
-			json.dump(metadata, f, indent=4)
+		if file_extension:
+			if not os.path.isdir(dir_name):
+				os.makedirs(dir_name)
+		else:
+			if not os.path.isdir(filename_or_path):
+				os.makedirs(filename_or_path)
+
+		# Iterate through frame indexes
+		for frame_index in frame_indexes:
+			# Convert specified frames to 
+			frame_array = self.raw_frame_to_array(frame_index)
+
+			# Adjust for scale factor
+			if scale_factor > 1:
+				frame_array = np.repeat(np.repeat(frame_array, scale_factor, axis = 0), scale_factor, axis = 1)
+
+			# Pass NumPy array to PIL
+			out = frame_array.tostring("F")	
+			with Image.frombytes("RGBA", (len(frame_array), len(frame_array[0])), out) as out:
+
+				if file_extension:
+					if file_extension == ".ppm":
+						file_extension = ".png"
+					# Default is to assume the base_name of the path is a file and notate it as a file
+					final_file = os.path.join(dir_name, f"{file_name}_{str(frame_index).zfill(3)}{file_extension}")
+				else:
+					# Check to see if a file extension was set, and if not, assume Base_name is a dir and not a file
+					final_file = os.path.join(filename_or_path, f"{str(frame_index).zfill(3)}.png")
+				
+				# Output image
+				print(f"Exporting frame {frame_index + 1} of {self.frame_count}")
+				out.save(final_file)
+
+			out.close()
+			del out
+
+	def export_sounds(self,
+			out_path: str | os.PathLike,
+			sound_indexes: Iterable[int] | None = None,
+			export_original_bgm_speed: bool = False) -> None:
+		"""
+		Exports all the sounds from the the Flipnote to the specified output path.
+
+		All sounds are exported to WAV format.
+
+		When `sound_indexes = None`, all sounds will be exported.
+
+		Parameters
+		----------
+		self : PPM
+			PPM instance
+		out_path : str | os.PathLike
+			Output path for the audio
+		sound_indexes : Iterable[int] | None (default = None)
+			An iterable containing indexes of the desired raw sound data within `self.raw_sound_data`. If `None`, all sounds will be exported
+			- 0 = BGM
+			- 1 = SFX1
+			- 2 = SFX2
+			- 3 = SFX3
+		export_original_bgm_speed : bool (default = False)
+			If `True`, a version of the BGM that isn't sped up/slowed down will be exported as `BGM_ORIGINAL.wav`. This will only have an effect if the Flipnote is actually sped up or slowed down
+		"""
+
+		if not HAS_MOVIEPY:
+			raise PPMMissingDependency("moviepy")
+
+		# Overwrite the indexes range if the user just wants to export everything
+		if sound_indexes is None:
+			sound_indexes = range(4)
+		# If not exporting all, check to see if the input is a list or tuple, and make it a set for minor speedup
+		elif type(sound_indexes) in [list, tuple]:
+			sound_indexes = set(sound_indexes)
+
+		# Get normal sample rate
+		normal_rate = 8192
+
+		# Calculate a new rate for the BGM if it happens to be different so we can check it later
+		new_rate = normal_rate * (float(self.FPS) / SPEEDS[self.bgm_frame_speed])
+
+		# Create output directory tree
+		if not os.path.isdir(out_path):
+			os.makedirs(out_path)
+
+		# Iterate through selected sound indexes
+		for sound_index in sound_indexes:
+			# GEt sound data
+			sound_data = self.sound_data_to_4bit_adpcm(sound_index)
+
+			# If there is no data, skip
+			if not sound_data:
+				print(f"Skipping {SOUND_NAMES[sound_index]} as it wasn't used")
+				continue
+
+			# Set the name of the file that will be exported to the output path
+			file_name = SOUND_NAMES[sound_index] + ".wav"
+			final_file = os.path.join(out_path, file_name)
+
+			# Check the current sound index to see if its the BGM
+			match sound_index:
+				case 0:
+					# Write new rate first
+					self._wav_file_setup(final_file, new_rate, sound_data)
+
+					if not export_original_bgm_speed:
+						continue
+					if export_original_bgm_speed:
+						if normal_rate == new_rate:
+							print("Original BGM was reuqested but is identical to normal BGM, skipping")
+							continue
+
+						print(f"Exporting original BGM by request")
+						self._wav_file_setup(os.path.join(out_path, "BGM_ORIGINAL.wav"), normal_rate, sound_data)
+				
+				case _:
+					print(f"Exporting sound file {file_name}")
+					self._wav_file_setup(final_file, normal_rate, sound_data)
+
+	def export_gif(self,
+			filename_or_path: str | os.PathLike,
+			scale_factor: int = 1,
+			keep_temp_frames: bool = False,
+			export_audio: bool = False) -> None:
+		"""
+		Exports the entire Flipnote animation as a GIF file.
+
+		All frames and sounds will be exported to a tempfile directory so they can be used for export. Setting `keep_temp_frames = True` and/or `keep_temp_sounds = True` will move them to a child folder with the same name of the video file and dump the frames and sounds into subdirectories named `img` and `snd` respecitvely.
+
+		Parameters
+		----------
+		self : PPM
+			PPM instance
+		filename_or_path : str | os.PathLike
+			Output filename or path for the video. If a file name is given (e.g. `flipnote.webm`), the video will be exported with that name and its format and encoding will be determined by the file extension. If only a path is given (e.g. `/mydir1/mydir2`), the video's name will be `self.input_filename` (the name of the PPM file given when instantiating the PPM class) and its format will default to MP4.
+		scale_factor : int (default = 1)
+			Factor to upscale each frame of the video by
+			- 1 = Native `256px x 192px`
+			- 2 = 2x upscale `512px x 384px`
+			- 4 = 4x upscale `1024px x 768px`
+			- ...
+		keep_temp_frames : bool (default = False)
+			If `True`, the frame tempfiles will be moved to a subfolder in the rightmost directory of speicifed in `filename_or_path`
+		export_audio_files : bool (default = False)
+			Although GIF does not support audio, if this is `True`, all audio will be exported alongside the GIF to a subfolder in the rightmost directory of speicifed in `filename_or_path`
+		"""
+
+		if not HAS_MOVIEPY:
+			raise PPMMissingDependency("moviepy")
+		
+		# Make path absolute and break base to check if its a file
+		dir_name, base_name = os.path.abspath(os.path.dirname(filename_or_path)), os.path.basename(filename_or_path)
+		file_name, file_extension = os.path.splitext(base_name)
+		
+		# If a file name was passed to us
+		if file_extension:
+			# If we're keeping frames or sounds, we want a subdirectory
+			if any([keep_temp_frames, export_audio]):
+				export_dir = os.path.join(dir_name, file_name)
+			# If not, its fine to go straight to the given directory
+			else:
+				export_dir = dir_name
+
+			# Create final name
+			final_file_name = f"{file_name}{file_extension}"
+		else:
+			# If we're keeping frames or sounds, we want a subdirectory
+			if any([keep_temp_frames, export_audio]):
+				export_dir = os.path.join(filename_or_path, file_name)
+			# If not, its fine to go straight to the given directory
+			else:
+				export_dir = filename_or_path
+
+			# Create final name
+			final_file_name = f"{self.input_filename}.mp4"
+
+		# Make the output argument
+		final_file = os.path.join(export_dir, final_file_name)
+
+		# Make directories
+		os.makedirs(export_dir, exist_ok=True)
+
+		with TemporaryDirectory(prefix="ppm_frames_") as frames_dir:
+			# Export frames
+			self.export_frames(frames_dir, scale_factor=scale_factor)
+
+			# If the user wants the audio exported anyway
+			if export_audio:
+				store_sounds_dir = os.path.join(export_dir, f"{file_name}_data", self.sounds_outdir_name)
+				os.makedirs(store_sounds_dir)
+				self.export_sounds(store_sounds_dir, export_original_bgm_speed=True)
+
+			# Create ImageSequenceClip
+			video = self.exported_frames_to_image_sequence_clip(frames_dir)
+
+			video.set_duration(self.duration)
+
+			video.write_gif(final_file, program="ffmpeg")
+
+			self._clean_up_garbage()
+			gc.collect()
+
+			if keep_temp_frames:
+				print("Copying frames...")
+				store_frames_dir = os.path.join(export_dir, self.frames_outdir_name)
+				shutil.move(frames_dir, store_frames_dir)
+
+	def export_video(self,
+			filename_or_path: str | os.PathLike,
+			scale_factor: int = 1,
+			include_sound: bool = True,
+			keep_temp_frames: bool = False,
+			keep_temp_sounds: bool = False,
+			video_codec: str | None = None,
+			audio_codec: str | None = None,
+			ffmpeg_params: Iterable[str] = None) -> None:
+		"""
+		Exports the entire Flipnote animation as a video file.
+
+		All frames and sounds will be exported to a tempfile directory so they can be used for export. Setting `keep_temp_frames = True` and/or `keep_temp_sounds = True` will move them to a child folder with the same name of the video file and dump the frames and sounds into subdirectories named `img` and `snd` respecitvely.
+
+		Parameters
+		----------
+		self : PPM
+			PPM instance
+		filename_or_path : str | os.PathLike
+			Output filename or path for the video. If a file name is given (e.g. `flipnote.webm`), the video will be exported with that name and its format and encoding will be determined by the file extension. If only a path is given (e.g. `/mydir1/mydir2`), the video's name will be `self.input_filename` (the name of the PPM file given when instantiating the PPM class) and its format will default to MP4.
+		scale_factor : int (default = 1)
+			Factor to upscale each frame of the video by
+			- 1 = Native `256px x 192px`
+			- 2 = 2x upscale `512px x 384px`
+			- 4 = 4x upscale `1024px x 768px`
+			- ...
+		include_sound : bool (default = True)
+			Whether to export the video with sound or not. Is forced to `False` if the Flipnote has no sound data
+		keep_temp_frames : bool (default = False)
+			If `True`, the frame tempfiles will be moved to subfolder in the rightmost directory of speicifed in `filename_or_path`
+		keep_temp_sounds : bool (default = False)
+			If `True`, the sound tempfiles will be moved to subfolder in the rightmost directory of speciifed in `filename_or_path`
+		video_codec : str | None (default = None)
+			Video codec to be passed to MoviePy on export. If `None`, default settings will be used
+		audio_codec : str | None (default = None)
+			Audio codec to be passed to MoviePy on export. If `None`, default settings will be used. Ignored if `include_sound = False`
+		ffmpeg_params : Iterable[str] (defualt = None)
+			Additional FFMpeg parameters to pass to MoviePy on export. Ignored if `None`
+		"""
+
+		if not HAS_MOVIEPY:
+			raise PPMMissingDependency("moviepy")
+		
+		# Force no sound if we don't even have any
+		if not any(self.raw_sound_data):
+			include_sound = False
+
+		# Set up kwargs for MoviePy
+		codec_kwargs = {}
+		if not include_sound:
+			codec_kwargs["audio"] = None
+		if video_codec is not None:
+			codec_kwargs["codec"] = video_codec
+		if audio_codec is not None and include_sound:
+			codec_kwargs["audio_codec"] = audio_codec
+		if ffmpeg_params is not None:
+			codec_kwargs["ffmpeg_params"] = ffmpeg_params
+		
+		# Make path absolute and break base to check if its a file
+		dir_name, base_name = os.path.abspath(os.path.dirname(filename_or_path)), os.path.basename(filename_or_path)
+		file_name, file_extension = os.path.splitext(base_name)
+		
+		# If a file name was passed to us
+		if file_extension:
+			# If we're keeping frames or sounds, we want a subdirectory
+			if any([keep_temp_frames, keep_temp_sounds]):
+				export_dir = os.path.join(dir_name, file_name)
+			# If not, its fine to go straight to the given directory
+			else:
+				export_dir = dir_name
+
+			# Create final name
+			final_file_name = f"{file_name}{file_extension}"
+		else:
+			# If we're keeping frames or sounds, we want a subdirectory
+			if any([keep_temp_frames, keep_temp_sounds]):
+				export_dir = os.path.join(filename_or_path, file_name)
+			# If not, its fine to go straight to the given directory
+			else:
+				export_dir = filename_or_path
+
+			# Create final name
+			final_file_name = f"{self.input_filename}.mp4"
+
+		# Make the output argument
+		final_file = os.path.join(export_dir, final_file_name)
+
+		# Make directories
+		os.makedirs(export_dir, exist_ok=True)
+
+		# Open temporary directories for frames and sounds
+		with TemporaryDirectory(prefix="ppm_frames_") as frames_dir:
+			with TemporaryDirectory(prefix="ppm_sounds_") as sounds_dir:
+				# Export frames
+				self.export_frames(frames_dir, scale_factor=scale_factor)
+
+				# Create ImageSequenceClip
+				video = self.exported_frames_to_image_sequence_clip(frames_dir)
+
+				# If we want sounds
+				if include_sound:
+					# Export sounds
+					self.export_sounds(sounds_dir, export_original_bgm_speed=keep_temp_sounds)
+
+					# Compose sounds and merge with video
+					composite_sounds = self.compose_audio(sounds_dir)
+					video = video.set_audio(composite_sounds)
+
+				video.set_duration(self.duration)
+
+				# Export video
+				video.write_videofile(final_file, **codec_kwargs)
+
+				# Clean up leftover data to free up memory
+				self._clean_up_garbage()
+				gc.collect()
+
+				# Move frames
+				if keep_temp_frames:
+					print("Copying frames...")
+					store_frames_dir = os.path.join(export_dir, self.frames_outdir_name)
+					shutil.copytree(frames_dir, store_frames_dir)
+
+				# Move sounds
+				if include_sound and keep_temp_sounds:
+					print("Copying sounds...")
+					store_sounds_dir = os.path.join(export_dir, self.sounds_outdir_name)
+					shutil.copytree(sounds_dir, store_sounds_dir)
+
+	def export_all(self,
+			out_path: str | os.PathLike,
+			animation_format: str = "mp4",
+			scale_factor: int = 1,
+			thumb_scale_factor: int = 1,
+			include_sound: bool = True,
+			video_codec: str | None = None,
+			audio_codec: str | None = None,
+			ffmpeg_params: Iterable[str] = None) -> None:
+		"""
+		Exports everything in the Flipnote to an output path and creats an animation with the given format.
+
+		This si a quick way to dump entire PPM files with a single function. If you only want an aniamtion, use `export_video()` or `export_gif()`. If you just want frames or sounds, use `export_frames()` or `export_sounds()` respectively. If all you want is the Flipnote thumbnail or the metadata, use `export_thumbnail()` or `export_metadata()`.
+
+		Parameters
+		----------
+		self : PPM
+			PPM instance
+		out_path : str | os.PathLike
+			Output path for the complete export
+		animation_format : str (defult = "mp4")
+			The format to export the animation. Supports all FFPmeg-compatible formats
+		scale_factor : int (default = 1)
+			Factor to upscale each frame of the animation
+			- 1 = Native `256px x 192px`
+			- 2 = 2x upscale `512px x 384px`
+			- 4 = 4x upscale `1024px x 768px`
+			- ...
+		scale_factor : int (default = 1)
+			Factor to upscale the thumbnail of the Flipnote by
+			- 1 = Native `64px x 48px`
+			- 2 = 2x upscale `128px x 96px`
+			- 4 = 4x upscale `256px x 192px`
+			- ...
+		include_sound : bool (default = True)
+			Whether to export the video with sound or not. Is forced to `False` if the Flipnote has no sound data
+		video_codec : str | None (default = None)
+			Video codec to be passed to MoviePy on export. If `None`, default settings will be used
+		audio_codec : str | None (default = None)
+			Audio codec to be passed to MoviePy on export. If `None`, default settings will be used. Ignored if `include_sound = False`
+		ffmpeg_params : Iterable[str] (defualt = None)
+			Additional FFMpeg parameters to pass to MoviePy on export. Ignored if `None`
+		"""
+
+		if not HAS_MOVIEPY:
+			raise PPMMissingDependency("moviepy")
+		
+		# Force no sound if we don't even have any
+		if not any(self.raw_sound_data):
+			include_sound = False
+
+		# Set up kwargs for MoviePy
+		codec_kwargs = {}
+		if not include_sound:
+			codec_kwargs["audio"] = None
+		if video_codec is not None:
+			codec_kwargs["codec"] = video_codec
+		if audio_codec is not None and include_sound:
+			codec_kwargs["audio_codec"] = audio_codec
+		if ffmpeg_params is not None:
+			codec_kwargs["ffmpeg_params"] = ffmpeg_params
+		
+		# Make path absolute and break base to check if its a file
+		export_dir = os.path.join(os.path.abspath(out_path), self.input_filename)
+		final_file = os.path.join(export_dir, f"{self.input_filename}.{animation_format}")
+
+		# Make directories
+		os.makedirs(export_dir, exist_ok=True)
+
+		# Export metadata
+		self.export_metadata(export_dir)
+
+		# Export thumbnail
+		self.export_thumbnail(export_dir, scale_factor=thumb_scale_factor)
+
+		# Open temporary directories for frames and sounds
+		with TemporaryDirectory(prefix="ppm_frames_") as frames_dir:
+			with TemporaryDirectory(prefix="ppm_sounds_") as sounds_dir:
+				# Export frames
+				self.export_frames(frames_dir, scale_factor=scale_factor)
+
+				# Create ImageSequenceClip
+				video = self.exported_frames_to_image_sequence_clip(frames_dir)
+
+				# If we want sounds
+				if include_sound:
+					# Export sounds
+					self.export_sounds(sounds_dir, export_original_bgm_speed=True)
+
+					# Compose sounds and merge with video
+					composite_sounds = self.compose_audio(sounds_dir)
+					video = video.set_audio(composite_sounds)
+				
+				# Ensure video duration is set properly
+				video.set_duration(self.duration)
+
+				# Check animation type
+				match animation_format.lower():
+					case "gif":
+						video.write_gif(final_file, program="ffmpeg")
+					case _:
+						video.write_videofile(final_file, **codec_kwargs)
+
+				# Clean up leftover data to free up memory
+				self._clean_up_garbage()
+				gc.collect()
+
+				# Move frames
+				print("Copying frames...")
+				store_frames_dir = os.path.join(export_dir, self.frames_outdir_name)
+				shutil.copytree(frames_dir, store_frames_dir)
+
+				# Move sounds
+				print("Copying sounds...")
+				store_sounds_dir = os.path.join(export_dir, self.sounds_outdir_name)
+				shutil.copytree(sounds_dir, store_sounds_dir)

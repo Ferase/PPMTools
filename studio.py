@@ -3,7 +3,7 @@ import sys
 import glob
 import shutil
 import argparse
-import PPMTools as ppm
+from PPMTools import PPM
 
 # Define an exception catcher that will keep the terminal open during an exception
 def show_exception_and_exit(exc_type, exc_value, tb):
@@ -14,12 +14,11 @@ def show_exception_and_exit(exc_type, exc_value, tb):
 
 sys.excepthook = show_exception_and_exit # Set exception hook
 
-
-
 CWD = os.path.abspath(os.path.dirname(__file__))
-IMG_FOLER_NAME = "img"
-SND_FOLDER_NAME = "snd"
 
+
+
+# Set up arguments
 parser = argparse.ArgumentParser(
     prog="PPMTools Studio",
     description="A parser and exporter for Flipnote Studio PPM files. Original code from Hatenatools by pbsds (Peder Bergebakken Sundt) and restructured and optimized for Python 3 by Ferase (Parker Lippstock)"
@@ -28,20 +27,21 @@ parser.add_argument(
     dest="files",
     nargs="*",
     type=str,
-    help="Flipnote Studio PPM file(s) to process. Invoked when dragging PPM files onto this script, ignores -i"
-)
-parser.add_argument(
-    "-i", "--indir",
-    dest="in_dir",
-    type=os.path.abspath,
-    help="Input directory containing PPM files. WIll be ignored if single files are provided via the files argument"
+    help="Flipnote PPM files to process. Can be a list of files, folders, or both"
 )
 parser.add_argument(
     "-o", "--outdir",
     dest="out_dir",
-    type=os.path.abspath,
-    default=os.path.join(CWD, "output"),
+    default=None,
     help="Output directory for dumped/exported data"
+)
+parser.add_argument(
+    "-e", "--format",
+    dest="format",
+    choices=["mp4", "webm", "avi", "gif"],
+    type=str,
+    default="mp4",
+    help="Animation format to export the Flipnote to. Defualt is MP4"
 )
 parser.add_argument(
     "-u", "--upscale",
@@ -57,22 +57,10 @@ parser.add_argument(
     help="Dumps everything possible, doesn't delete any leftover data after MP4/GIF export"
 )
 parser.add_argument(
-    "-k", "--keepall",
-    dest="keep_all",
-    action="store_true",
-    help="Keep all data after dumping and exporting, don't delete anything"
-)
-parser.add_argument(
     "-f", "--keepframes",
     dest="keep_frames",
     action="store_true",
     help="Doesn't delete frames after export. If set, all extracted resources will be put into a child folder inside of the output directory"
-)
-parser.add_argument(
-    "-sf", "--skipframes",
-    dest="skip_frames",
-    action="store_true",
-    help="Skips exporting frames altogether. Also skips exporting MP4/GIF"
 )
 parser.add_argument(
     "-s", "--keepsounds",
@@ -93,6 +81,13 @@ parser.add_argument(
     help="Dump the Flipnote's thumbnail image"
 )
 parser.add_argument(
+    "-tu", "--thumbupscale",
+    dest="thumb_scale_factor",
+    type=int,
+    default=1,
+    help="Upscale thumbnail image a scale factor. Default is native resolution (scale_factor = 1), which is 64px x 48px"
+)
+parser.add_argument(
     "-m", "--dumpmeta", "--dumpmetadata",
     dest="dump_meta",
     action="store_true",
@@ -105,14 +100,6 @@ parser.add_argument(
     help="Skip exporting Flipnote as an MP4 or GIF. Pair this with -k, -f, -s, -t, and/or -m to just get the data"
 )
 parser.add_argument(
-    "-e", "--exporttype",
-    dest="export_type",
-    choices=["MP4", "GIF"],
-    type=str,
-    default="MP4",
-    help="Whether to export video as MP4 or GIF"
-)
-parser.add_argument(
     "-c", "--copyppm",
     dest="copy_ppm",
     action="store_true",
@@ -123,135 +110,77 @@ args = parser.parse_args()
 
 
 
-def GetInFiles():
-    # Prioritize single files
-    if args.files:
-        return args.files
-    elif args.in_dir:
-        return glob.glob(os.path.join(os.path.abspath(args.in_dir), "*.ppm"))
+# Create list of PPM files based on passed list
+if args.files:
+    new_files = []
 
-# Create output folders
-def CreateDumpDir(flip_name: str):
-    # Set dump dir
-    dump_dir = os.path.join(args.out_dir, flip_name)
+    # GO through the files argument
+    for item in args.files:
+        # Set up paths
+        absolute_item_path = os.path.abspath(os.path.dirname(item))
+        file_name, file_extension = os.path.splitext(os.path.basename(item))
 
-    # If the directory exists, delete it so we can start fresh
-    if os.path.exists(dump_dir):
-        shutil.rmtree(dump_dir)
-    
-    # Make output directory tree
-    os.makedirs(dump_dir)
-
-    return dump_dir
-
-
-# Get files from args
-FILES = GetInFiles()
-
-# Close script if no files were provided
-if not FILES:
-    input("No files were given!")
+        # If the file extension is present, we're likely being pointed towards a file
+        if file_extension:
+            new_files.append(item)
+        # If not, it's probably a dir, so look for PPMs inside of it
+        else:
+            for ppm_file in glob.glob(os.path.join(item, "*.ppm")):
+                new_files.append(ppm_file)
+else:
+    input("No PPM files were passed, exiting")
     exit()
 
-# Loop through all files
-for flipnote in FILES:
+# Iterate through all files
+for file in new_files:
 
-    # Get absolute path to flipnote
-    flipnote_path_absolute = os.path.abspath(flipnote)
+    # Swap boolean for sounds check
+    has_sound = not args.skip_sounds
 
-    # Instantiate PPM class and read flipnote
-    PPM_INSTANCE = ppm.PPM()
-    flip = PPM_INSTANCE.ReadFile(flipnote_path_absolute)
+    # Set output directory based on if the user is keeping frames or sounds
+    if not args.out_dir:
+        if any([args.keep_frames, args.keep_sounds]) and not args.dump_all:
+            final_out_dir = os.path.join(CWD, "output", os.path.splitext(os.path.basename(file))[0])
+        # export_all() handles exporting to subdirectories
+        else:
+            final_out_dir = os.path.join(CWD, "output")
+    
+    # Instantiate PPM class with PPM file
+    flip = PPM(file)
 
-    # Get the name of the input PPM file without extension
-    flip_name = os.path.splitext(os.path.basename(flipnote))[0]
-
-    # Create paths and return them in full, relative to CWD
-    dump_dir = CreateDumpDir(flip_name)
-
-    # Output files to output dir if user isn't keeping all, frames, and/or sounds
-    output_dir = args.out_dir
-
-    # Check all arguments for keeping dumped items. We only care about frames and sounds here since the thumbnail and metadata will be named the same as the Flipnote
-    keeping_dumps = any([args.dump_all, args.keep_all, args.keep_frames, args.keep_sounds])
-
-    # Set the output dir to the dumping dir if they are keeping all, frames, and/or sounds
-    if keeping_dumps:
-        output_dir = dump_dir
-
-    # Get animation stream settings
-    speed, fps, duration = flip.GetAnimationStreamSettings()
-
-    # Export metadata if requested
-    if args.dump_all or args.dump_meta:
-        flip.ExportMetadata(output_dir, flip_name)
-
-    # Export thumbnail image if requested
-    if args.dump_all or args.dump_thumb:
-        flip.ExportThumbnail(output_dir, flip_name)
-
-    if not args.skip_frames:
-        # Set and create images dir
-        images_dir = os.path.join(dump_dir, IMG_FOLER_NAME)
-        os.mkdir(images_dir)
-
-        # Dump images to the flip_name/img folder and set scale if user defined a different factor
-        flip.DumpFrames(images_dir, args.scale_factor)
-
-        # Create a moviepy image sequence
-        image_sequence = flip.CreateImageSequence(images_dir, fps)
-
-    # Set audio composite to None if there is no sound
-    audio_composite = None
-
-    # If we aren't skipping sounds, extract and composite them
-    if not args.skip_sounds:
-        # Set and create sounds dir
-        sounds_dir = os.path.join(dump_dir, SND_FOLDER_NAME)
-        os.mkdir(sounds_dir)
-
-        # Check if the Flipnote has sound
-        has_sound = flip.CheckIfSoundDataExists()
-        if has_sound:
-            # Dump sound files to the flip_name/snd folder
-            flip.DumpSoundFiles(sounds_dir)
-
-            # Create audio composite using dumped audio
-            audio_composite = flip.CompositeAudio(sounds_dir, fps)
-
-    # Check if we can export an MP4/GIF
-    allow_export = not any([args.skip_export, args.skip_frames])
-
-    # If we can export MP4/GIF
-    if allow_export:
-        # Export requested animation type
-        match args.export_type:
-            case "MP4":
-                flip.ExportVideo(flip_name, output_dir, fps, image_sequence, audio_composite)
-            case _:
-                flip.ExportGIF(flip_name, output_dir, fps, image_sequence)
-
-    # If we're keeping anything we dump (but not always everything)
-    if keeping_dumps:
-
-        # Check what we are deleting
-        delete_frames = any([args.skip_frames, args.keep_frames])
-        delete_sounds = any([args.skip_sounds, args.keep_sounds])
-
-        # If we're not keeping frames, delete them
-        if delete_frames:
-            shutil.rmtree(images_dir)
-
-        # If we're not keeping sounds, delete them
-        if delete_sounds:
-            shutil.rmtree(sounds_dir)
-
-    # Delete dump directory otherwise
+    # If we want it all, we get it all
+    if args.dump_all:
+        flip.export_all(final_out_dir, args.format, args.scale_factor, args.thumb_scale_factor, has_sound)
+    
     else:
-        shutil.rmtree(dump_dir)
+        # Dump metadata if we want it
+        if args.dump_meta:
+            flip.export_metadata(final_out_dir)
 
-        
+        # Dump thumbnail if we want it
+        if args.dump_thumb:
+            flip.export_thumbnail(final_out_dir, scale_factor=args.thumb_scale_factor)
 
-    # Copy PPM file to output directory
-    if args.dump_all or args.copy_ppm:
-        shutil.copy2(flipnote_path_absolute, output_dir)
+        # If we aren't exporting an animation, we cab stukk exoirt frames and sounds if we want to
+        if args.skip_export:
+            if args.keep_frames:
+                flip.export_frames(final_out_dir, scale_factor=args.scale_factor)
+            if args.keep_sounds and not args.skip_sounds:
+                flip.export_sounds(final_out_dir, scale_factor=args.scale_factor)
+
+        else:
+            # Check format for animation export
+            match args.format.lower():
+                # Use GIF function if we are exporting a GIF
+                case "gif": 
+                    flip.export_gif(os.path.join(final_out_dir, os.path.splitext(os.path.basename(file))[0] + f".gif"), scale_factor=args.scale_factor, keep_temp_frames=args.keep_frames, export_audio=args.keep_sounds)
+
+                # Everything else will be a video
+                case _:
+                    include_audio = not args.skip_sounds
+
+                    flip.export_video(os.path.join(final_out_dir, os.path.splitext(os.path.basename(file))[0] + f".{args.format}"), scale_factor=args.scale_factor, include_sound=include_audio, keep_temp_frames=args.keep_frames, keep_temp_sounds=args.keep_sounds)
+
+    # Copy out the PPM file if we want it
+    if args.copy_ppm:
+        shutil.copy2(file, os.path.join(final_out_dir, os.path.splitext(os.path.basename(file))[0]))
