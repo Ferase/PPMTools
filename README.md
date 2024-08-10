@@ -19,6 +19,7 @@ pip install -r requirements.txt
 ```
 
 3. Put the module in the same folder as your script and import the PPM class:
+```
 from PPMTools import PPM
 ```
 
