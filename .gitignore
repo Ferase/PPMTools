@@ -8,3 +8,5 @@ output/
 test_ppm/
 
 old/
+
+*.ppm

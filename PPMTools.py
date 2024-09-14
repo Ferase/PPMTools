@@ -1194,7 +1194,7 @@ class PPM:
 					composite_sounds = self.compose_audio(sounds_dir)
 					video = video.set_audio(composite_sounds)
 
-				video.set_duration(self.duration)
+				video = video.set_duration(self.duration)
 
 				# Export video
 				video.write_videofile(final_file, **codec_kwargs)
