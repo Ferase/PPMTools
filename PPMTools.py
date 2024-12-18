@@ -189,8 +189,6 @@ class PPM:
 			# Read what frames have SFX
 			self.sfx_usage = [(i&0x1!=0, i&0x2!=0, i&0x4!=0) for i in raw_data[sound_offset:sound_offset+self.frame_count]]
 
-			self._get_sound_size(sound_offset, self.frame_count, 0)
-
 			sound_size = (
 				self._ascii2dec(raw_data[
 					self._get_sound_size(sound_offset, self.frame_count, 0):
