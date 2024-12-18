@@ -189,20 +189,15 @@ class PPM:
 			# Read what frames have SFX
 			self.sfx_usage = [(i&0x1!=0, i&0x2!=0, i&0x4!=0) for i in raw_data[sound_offset:sound_offset+self.frame_count]]
 
-			sound_size = (
-				self._ascii2dec(raw_data[
-					self._get_sound_size(sound_offset, self.frame_count, 0):
-					self._get_sound_size(sound_offset, self.frame_count, 0, True)], True), # BGM
-				self._ascii2dec(raw_data[
-					self._get_sound_size(sound_offset, self.frame_count, 4):
-					self._get_sound_size(sound_offset, self.frame_count, 4, True)], True), # SFX1
-				self._ascii2dec(raw_data[
-					self._get_sound_size(sound_offset, self.frame_count, 8):
-					self._get_sound_size(sound_offset, self.frame_count, 8, True)], True), # SFX2
-				self._ascii2dec(raw_data[
-					self._get_sound_size(sound_offset, self.frame_count, 12):
-					self._get_sound_size(sound_offset, self.frame_count, 12, True)], True) # SFX3
-			)
+			sound_size = []
+			for i in range(4):
+				target_i = i * 4
+				sound_size.append(
+					self._ascii2dec(raw_data[
+						self._get_sound_size(sound_offset, self.frame_count, target_i):
+						self._get_sound_size(sound_offset, self.frame_count, target_i, True)], True
+					)
+				)
 
 			# Get framespeed
 			self.frame_speed = 8 - raw_data[self._add_padding(sound_offset+self.frame_count, 4) + 16]
