@@ -1177,7 +1177,7 @@ class PPM:
 				self.export_frames(frames_dir, scale_factor=scale_factor)
 
 				# Create ImageSequenceClip
-				video = self.exported_frames_to_image_sequence_clip(frames_dir)
+				video: ImageSequenceClip = self.exported_frames_to_image_sequence_clip(frames_dir)
 
 				# If we want sounds
 				if include_sound:
@@ -1291,7 +1291,7 @@ class PPM:
 				self.export_frames(frames_dir, scale_factor=scale_factor)
 
 				# Create ImageSequenceClip
-				video = self.exported_frames_to_image_sequence_clip(frames_dir)
+				video: ImageSequenceClip = self.exported_frames_to_image_sequence_clip(frames_dir)
 
 				# If we want sounds
 				if include_sound:
@@ -1303,7 +1303,7 @@ class PPM:
 					video = video.with_audio(composite_sounds)
 				
 				# Ensure video duration is set properly
-				video.with_duration(self.duration)
+				video = video.with_duration(self.duration)
 
 				# Check animation type
 				match animation_format.lower():
