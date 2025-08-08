@@ -173,7 +173,7 @@ for file in new_files:
             match args.format.lower():
                 # Use GIF function if we are exporting a GIF
                 case "gif": 
-                    flip.export_gif(os.path.join(final_out_dir, os.path.splitext(os.path.basename(file))[0] + f".gif"), scale_factor=args.scale_factor, keep_temp_frames=args.keep_frames, export_audio=args.keep_sounds)
+                    flip.export_gif(os.path.join(final_out_dir, os.path.splitext(os.path.basename(file))[0] + ".gif"), scale_factor=args.scale_factor, keep_temp_frames=args.keep_frames, export_audio=args.keep_sounds)
 
                 # Everything else will be a video
                 case _:

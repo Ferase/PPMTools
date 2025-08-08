@@ -23,8 +23,7 @@ except ImportError:
 
 # Import moviepy if we have it
 try:
-	from moviepy.editor import ImageSequenceClip, AudioFileClip, CompositeAudioClip
-	from moviepy.audio.AudioClip import AudioArrayClip
+	from moviepy import ImageSequenceClip, AudioFileClip, CompositeAudioClip
 	HAS_MOVIEPY = True
 except ImportError:
 	print("Please install moviepy in order to combine exported frames and audio into video or GIF formats (pip install moviepy)")
@@ -234,13 +233,14 @@ class PPM:
 	# ASCII string to decimal
 	def _ascii2dec(self, ascii, LittleEndian = False):
 		ret = 0
-		l = []
+		dec_list = []
 
 		for num in ascii:
-			l.append(num)
+			dec_list.append(num)
 
-		if LittleEndian: l.reverse()
-		for i in l:
+		if LittleEndian:
+			dec_list.reverse()
+		for i in dec_list:
 			ret = (ret<<8) | i
 			
 		return ret
@@ -258,7 +258,8 @@ class PPM:
 			if len(out) < length:
 				out = [0]*(length-len(out)) + out
 				
-		if LittleEndian: out.reverse()
+		if LittleEndian:
+			out.reverse()
 		return "".join(map(chr, out))
 
 	# Add byte padding
@@ -452,7 +453,7 @@ class PPM:
 
 		
 		# Merges this frame with the previous frame if new_frame isn't true:
-		if not new_frame and previous_frame.all() != None: # Maybe optimize this better for numpy...
+		if not new_frame and previous_frame.all() is not None: # Maybe optimize this better for numpy...
 			if frame_move[0] or frame_move[1]: # Moves the previous frame if specified:
 				new_previous_frame = np.zeros((2, 256, 192), dtype=np.bool_)
 				
@@ -707,7 +708,7 @@ class PPM:
 				start_time = frame_index / self.FPS
 
 				sfx_clip = AudioFileClip(sfx_file)
-				sfx_clip = sfx_clip.set_start(start_time)
+				sfx_clip = sfx_clip.with_start(start_time)
 				all_sounds.append(sfx_clip)
 
 		if not all_sounds:
@@ -984,7 +985,7 @@ class PPM:
 							print("Original BGM was reuqested but is identical to normal BGM, skipping")
 							continue
 
-						print(f"Exporting original BGM by request")
+						print("Exporting original BGM by request")
 						self._wav_file_setup(os.path.join(out_path, "BGM_ORIGINAL.wav"), normal_rate, sound_data)
 				
 				case _:
@@ -1067,7 +1068,7 @@ class PPM:
 			# Create ImageSequenceClip
 			video = self.exported_frames_to_image_sequence_clip(frames_dir)
 
-			video.set_duration(self.duration)
+			video.with_duration(self.duration)
 
 			video.write_gif(final_file, program="ffmpeg")
 
@@ -1185,9 +1186,9 @@ class PPM:
 
 					# Compose sounds and merge with video
 					composite_sounds = self.compose_audio(sounds_dir)
-					video = video.set_audio(composite_sounds)
+					video = video.with_audio(composite_sounds)
 
-				video = video.set_duration(self.duration)
+				video = video.with_duration(self.duration)
 
 				# Export video
 				video.write_videofile(final_file, **codec_kwargs)
@@ -1299,10 +1300,10 @@ class PPM:
 
 					# Compose sounds and merge with video
 					composite_sounds = self.compose_audio(sounds_dir)
-					video = video.set_audio(composite_sounds)
+					video = video.with_audio(composite_sounds)
 				
 				# Ensure video duration is set properly
-				video.set_duration(self.duration)
+				video.with_duration(self.duration)
 
 				# Check animation type
 				match animation_format.lower():
